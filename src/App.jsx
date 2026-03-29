@@ -2,23 +2,26 @@ import React, { useEffect, useMemo, useState } from 'react';
 
 const FORECAST_TEMPLATES = {
   morning: [
-    { name: 'The Weather Network', wind: '10-14 mph', direction: 'SW', gusts: '18 mph', waves: '1-2 ft' },
-    { name: 'Windfinder', wind: '9-13 mph', direction: 'SW', gusts: '17 mph', waves: '1-2 ft' },
-    { name: 'Windy', wind: '11-14 mph', direction: 'WSW', gusts: '18 mph', waves: '1-2 ft' },
-    { name: 'PredictWind', wind: '10-13 mph', direction: 'SW', gusts: '16 mph', waves: '1-2 ft' }
+    { name: 'The Weather Network', wind: '10-14 mph', direction: 'SW', gusts: '18 mph', waves: '1-2 ft', isDemo: true },
+    { name: 'Windfinder', wind: '9-13 mph', direction: 'SW', gusts: '17 mph', waves: '1-2 ft', isDemo: true },
+    { name: 'PredictWind', wind: '10-13 mph', direction: 'SW', gusts: '16 mph', waves: '1-2 ft', isDemo: true }
   ],
   afternoon: [
-    { name: 'The Weather Network', wind: '15-20 mph', direction: 'SW', gusts: '24 mph', waves: '1-2 ft' },
-    { name: 'Windfinder', wind: '14-18 mph', direction: 'SW', gusts: '22 mph', waves: '2-3 ft' },
-    { name: 'Windy', wind: '16-19 mph', direction: 'WSW', gusts: '25 mph', waves: '2-3 ft' },
-    { name: 'PredictWind', wind: '13-17 mph', direction: 'SW', gusts: '21 mph', waves: '1-2 ft' }
+    { name: 'The Weather Network', wind: '15-20 mph', direction: 'SW', gusts: '24 mph', waves: '1-2 ft', isDemo: true },
+    { name: 'Windfinder', wind: '14-18 mph', direction: 'SW', gusts: '22 mph', waves: '2-3 ft', isDemo: true },
+    { name: 'PredictWind', wind: '13-17 mph', direction: 'SW', gusts: '21 mph', waves: '1-2 ft', isDemo: true }
   ],
   evening: [
-    { name: 'The Weather Network', wind: '9-13 mph', direction: 'W', gusts: '16 mph', waves: '1 ft' },
-    { name: 'Windfinder', wind: '8-12 mph', direction: 'W', gusts: '15 mph', waves: '1-2 ft' },
-    { name: 'Windy', wind: '10-13 mph', direction: 'W', gusts: '17 mph', waves: '1-2 ft' },
-    { name: 'PredictWind', wind: '8-11 mph', direction: 'W', gusts: '14 mph', waves: '1 ft' }
+    { name: 'The Weather Network', wind: '9-13 mph', direction: 'W', gusts: '16 mph', waves: '1 ft', isDemo: true },
+    { name: 'Windfinder', wind: '8-12 mph', direction: 'W', gusts: '15 mph', waves: '1-2 ft', isDemo: true },
+    { name: 'PredictWind', wind: '8-11 mph', direction: 'W', gusts: '14 mph', waves: '1 ft', isDemo: true }
   ]
+};
+
+const AREA_COORDS = {
+  inner: { lat: 42.586, lon: -80.424, label: 'Inner Bay' },
+  outer: { lat: 42.629, lon: -80.318, label: 'Outer Bay' },
+  mixed: { lat: 42.607, lon: -80.371, label: 'Mixed' }
 };
 
 const BOAT_TYPES = [
@@ -94,6 +97,18 @@ function ftToM(ft) {
   return Math.round(ft * 0.3048 * 10) / 10;
 }
 
+function mToFt(m) {
+  return m * 3.28084;
+}
+
+function mpsToMph(v) {
+  return v * 2.23694;
+}
+
+function mpsToKmh(v) {
+  return v * 3.6;
+}
+
 function boatLabel(boat, units) {
   if (!boat) return 'Unknown boat';
   const length = units === 'metric' ? `${ftToM(Number(boat.lengthFt))} m` : `${boat.lengthFt} ft`;
@@ -102,6 +117,98 @@ function boatLabel(boat, units) {
 
 function titleCase(v) {
   return `${v.charAt(0).toUpperCase()}${v.slice(1)}`;
+}
+
+function toYmd(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function windowHours(block) {
+  if (block === 'morning') return [8, 11];
+  if (block === 'afternoon') return [12, 16];
+  return [17, 20];
+}
+
+function avg(values) {
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (!clean.length) return null;
+  return clean.reduce((sum, v) => sum + v, 0) / clean.length;
+}
+
+function minMax(values) {
+  const clean = values.filter((v) => Number.isFinite(v));
+  if (!clean.length) return null;
+  return { min: Math.min(...clean), max: Math.max(...clean) };
+}
+
+function degToCompass(deg) {
+  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  const idx = Math.round((((deg % 360) + 360) % 360) / 45) % 8;
+  return dirs[idx];
+}
+
+function windFromUv(u, v) {
+  const speed = Math.sqrt((u ** 2) + (v ** 2));
+  const deg = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
+  return { speed, direction: degToCompass(deg) };
+}
+
+function formatWind(speedMps, units) {
+  const value = units === 'metric' ? mpsToKmh(speedMps) : mpsToMph(speedMps);
+  const suffix = units === 'metric' ? 'km/h' : 'mph';
+  return `${Math.round(value)} ${suffix}`;
+}
+
+function formatWindRange(range, units) {
+  if (!range) return '—';
+  const min = units === 'metric' ? mpsToKmh(range.min) : mpsToMph(range.min);
+  const max = units === 'metric' ? mpsToKmh(range.max) : mpsToMph(range.max);
+  const suffix = units === 'metric' ? 'km/h' : 'mph';
+  return `${Math.round(min)}-${Math.round(max)} ${suffix}`;
+}
+
+function formatWaveRange(range, units) {
+  if (!range) return '—';
+  const min = units === 'metric' ? range.min : mToFt(range.min);
+  const max = units === 'metric' ? range.max : mToFt(range.max);
+  const suffix = units === 'metric' ? 'm' : 'ft';
+  if (Math.abs(min - max) < 0.15) return `${min.toFixed(1)} ${suffix}`;
+  return `${min.toFixed(1)}-${max.toFixed(1)} ${suffix}`;
+}
+
+function forecastScoreFromLive({ windAvg, gustAvg, waveAvg, area, boatLengthFt }) {
+  let score = 10;
+  const windMph = mpsToMph(windAvg || 0);
+  const gustMph = mpsToMph(gustAvg || 0);
+  const waveFt = mToFt(waveAvg || 0);
+
+  score -= Math.max(0, (windMph - 10) / 4);
+  score -= Math.max(0, (gustMph - 16) / 5);
+  score -= Math.max(0, (waveFt - 1) * 1.5);
+
+  if (area === 'outer') score -= 1;
+  if (area === 'mixed') score -= 0.5;
+  if (boatLengthFt <= 18) score -= 1;
+  else if (boatLengthFt <= 20) score -= 0.5;
+
+  return Math.max(1, Math.min(10, Math.round(score)));
+}
+
+function labelFromScore(score) {
+  if (score >= 9) return 'Excellent ride comfort for many family boats';
+  if (score >= 7) return 'Good day for many family boats';
+  if (score >= 5) return 'Usable, but expect some chop';
+  if (score >= 3) return 'Use caution for typical family boats';
+  return 'Poor ride comfort for many family boats';
+}
+
+function cautionFromScore(score, area) {
+  if (score >= 7) return `${AREA_COORDS[area].label} looks manageable in this time window.`;
+  if (score >= 5) return `${AREA_COORDS[area].label} may still be usable, but expect a rougher ride.`;
+  return `${AREA_COORDS[area].label} may be uncomfortable for many family boats in this time window.`;
 }
 
 function ScoreRing({ value, label }) {
@@ -159,20 +266,151 @@ function App() {
   const [actualWaveRange, setActualWaveRange] = useState('2-3 ft');
   const [actualScore, setActualScore] = useState('6');
   const [tripNote, setTripNote] = useState('Forecast was close, but rougher near the bay mouth.');
+  const [windyData, setWindyData] = useState({ status: 'idle', card: null, summary: null, message: '' });
 
   const activeBoat = boats.find((b) => b.id === boatId) || boats[0];
   const selectedPending = pendingTrips.find((t) => t.id === selectedPendingId) || pendingTrips[0];
-  const forecastSources = FORECAST_TEMPLATES[timeBlock] || FORECAST_TEMPLATES.afternoon;
 
   const personalAverage = useMemo(() => {
     if (!completedTrips.length) return null;
-    const avg = completedTrips.reduce((sum, t) => sum + Number(t.actualScore || 0), 0) / completedTrips.length;
-    return Math.round(avg * 10) / 10;
+    const avgScore = completedTrips.reduce((sum, t) => sum + Number(t.actualScore || 0), 0) / completedTrips.length;
+    return Math.round(avgScore * 10) / 10;
   }, [completedTrips]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const key = import.meta.env.VITE_WINDY_API_KEY;
+    if (!key) {
+      setWindyData({ status: 'missing-key', card: null, summary: null, message: 'Windy key not found in app environment.' });
+      return;
+    }
+
+    const coords = AREA_COORDS[area];
+    const [startHour, endHour] = windowHours(timeBlock);
+
+    async function fetchWindy() {
+      setWindyData((prev) => ({ ...prev, status: 'loading', message: '' }));
+      try {
+        const windBody = {
+          lat: coords.lat,
+          lon: coords.lon,
+          model: 'gfs',
+          parameters: ['wind', 'windGust'],
+          levels: ['surface'],
+          key
+        };
+
+        const wavesBody = {
+          lat: coords.lat,
+          lon: coords.lon,
+          model: 'gfsWave',
+          parameters: ['waves'],
+          levels: ['surface'],
+          key
+        };
+
+        const [windResp, waveResp] = await Promise.all([
+          fetch('https://api.windy.com/api/point-forecast/v2', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(windBody)
+          }),
+          fetch('https://api.windy.com/api/point-forecast/v2', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(wavesBody)
+          })
+        ]);
+
+        if (!windResp.ok) throw new Error(`Windy wind request failed: ${windResp.status}`);
+        if (!waveResp.ok) throw new Error(`Windy wave request failed: ${waveResp.status}`);
+
+        const windJson = await windResp.json();
+        const waveJson = await waveResp.json();
+
+        const ts = windJson.ts || [];
+        const u = windJson['wind_u-surface'] || [];
+        const v = windJson['wind_v-surface'] || [];
+        const gust = windJson['gust-surface'] || [];
+        const waveHeight = waveJson['waves_height-surface'] || [];
+
+        const indexes = ts
+          .map((stamp, idx) => ({ idx, date: new Date(stamp) }))
+          .filter(({ date }) => toYmd(date) === tripDate && date.getHours() >= startHour && date.getHours() <= endHour)
+          .map(({ idx }) => idx);
+
+        if (!indexes.length) {
+          throw new Error('No Windy forecast points returned for that date and time window.');
+        }
+
+        const windVectors = indexes.map((idx) => windFromUv(u[idx], v[idx]));
+        const windSpeedRange = minMax(windVectors.map((item) => item.speed));
+        const avgWindVector = windFromUv(avg(indexes.map((idx) => u[idx])) || 0, avg(indexes.map((idx) => v[idx])) || 0);
+        const gustRange = minMax(indexes.map((idx) => gust[idx]));
+        const waveRange = minMax(indexes.map((idx) => waveHeight[idx]));
+        const waveAvg = avg(indexes.map((idx) => waveHeight[idx])) || 0;
+        const gustAvg = avg(indexes.map((idx) => gust[idx])) || 0;
+        const windAvg = avg(windVectors.map((item) => item.speed)) || 0;
+
+        const liveScore = forecastScoreFromLive({
+          windAvg,
+          gustAvg,
+          waveAvg,
+          area,
+          boatLengthFt: Number(activeBoat?.lengthFt || 21)
+        });
+
+        const card = {
+          name: 'Windy',
+          wind: formatWindRange(windSpeedRange, units),
+          direction: avgWindVector.direction,
+          gusts: formatWindRange(gustRange, units),
+          waves: formatWaveRange(waveRange, units),
+          isLive: true,
+          updatedAt: new Date().toLocaleString()
+        };
+
+        const summary = {
+          predicted: liveScore,
+          label: labelFromScore(liveScore),
+          caution: cautionFromScore(liveScore, area),
+          confidence: 74
+        };
+
+        if (!cancelled) {
+          setWindyData({ status: 'ready', card, summary, message: '' });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setWindyData({ status: 'error', card: null, summary: null, message: error.message || 'Windy request failed.' });
+        }
+      }
+    }
+
+    fetchWindy();
+    return () => { cancelled = true; };
+  }, [area, timeBlock, tripDate, units, activeBoat]);
+
+  const forecastSources = useMemo(() => {
+    const demoSources = FORECAST_TEMPLATES[timeBlock] || FORECAST_TEMPLATES.afternoon;
+    return windyData.card ? [windyData.card, ...demoSources] : demoSources;
+  }, [timeBlock, windyData.card]);
 
   const recommendation = useMemo(() => {
     const boatLength = Number(activeBoat?.lengthFt || 21);
     const smallBoatPenalty = boatLength <= 18 ? 1 : boatLength <= 20 ? 0.5 : 0;
+    const livePredicted = windyData.summary?.predicted;
+
+    if (livePredicted) {
+      return {
+        predicted: livePredicted,
+        personal: personalAverage || Math.max(1, Math.min(10, livePredicted + 1)),
+        allUsers: communityMode === 'similar' ? livePredicted : Math.min(10, livePredicted + 1),
+        label: windyData.summary.label,
+        caution: windyData.summary.caution,
+        confidence: windyData.summary.confidence
+      };
+    }
 
     if (area === 'inner') {
       return {
@@ -204,7 +442,7 @@ function App() {
       caution: 'Southwest wind may create uncomfortable chop in Outer Bay.',
       confidence: 72
     };
-  }, [activeBoat, area, communityMode, personalAverage]);
+  }, [activeBoat, area, communityMode, personalAverage, windyData.summary]);
 
   function addBoat() {
     const lengthFt = Number(newBoatLengthFt);
@@ -356,13 +594,20 @@ function App() {
             </div>
           </Card>
 
-          <Card title="Forecast by source" subtitle="Wind speed, direction, gusts, and wave height shown separately.">
+          <Card title="Forecast by source" subtitle="Windy is live now. The other sources are still demo placeholders until they are connected.">
             <div className="stack">
+              {windyData.status === 'loading' ? <div className="info-box">Loading live Windy forecast…</div> : null}
+              {windyData.status === 'error' ? <div className="info-box">Windy error: {windyData.message}</div> : null}
+              {windyData.status === 'missing-key' ? <div className="info-box">{windyData.message}</div> : null}
               {forecastSources.map((source) => (
                 <div className="forecast-card" key={source.name}>
                   <div className="forecast-head">
                     <strong>{source.name}</strong>
-                    <span className="badge">{timeBlock}</span>
+                    <div className="inline-actions">
+                      {source.isLive ? <span className="badge">live</span> : null}
+                      {source.isDemo ? <span className="badge">demo</span> : null}
+                      <span className="badge">{timeBlock}</span>
+                    </div>
                   </div>
                   <div className="grid-2">
                     <div className="metric-box">
@@ -377,6 +622,9 @@ function App() {
                       <div className="metric-label">Waves</div>
                       <div className="metric-value">{source.waves}</div>
                     </div>
+                    {source.updatedAt ? (
+                      <div className="tiny-note full">Updated: {source.updatedAt}</div>
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -518,12 +766,11 @@ function App() {
             </div>
           </Card>
 
-          <Card title="Add a boat">
+          <Card title="Add a boat" subtitle="Version 1 range is 15 to 30 feet.">
             <div className="stack">
               <div>
                 <label>Boat length in feet</label>
                 <input value={newBoatLengthFt} onChange={(e) => setNewBoatLengthFt(e.target.value)} />
-                <div className="tiny-note">Version 1 range: 15 to 30 feet</div>
               </div>
               <div>
                 <label>Boat type</label>
@@ -583,18 +830,14 @@ function App() {
       <Card title="Score guide">
         <div className="stack">
           {SCORE_GUIDE.map((item) => (
-            <div className="guide-row" key={item.score}>
-              <strong>{item.score}</strong> — {item.text}
-            </div>
+            <div key={item.score} className="guide-item"><strong>{item.score}</strong> — {item.text}</div>
           ))}
         </div>
       </Card>
 
-      <Card title="Important note">
-        <div className="warning-box">
-          This package is usable as a demo web app now. Forecast values are still sample data, and saved data stays in the browser only. To make it a real public app, connect weather APIs and a backend.
-        </div>
-      </Card>
+      <div className="warning-box">
+        Windy is now wired for live data. The other forecast sources are still placeholders until their APIs are added.
+      </div>
     </div>
   );
 }
