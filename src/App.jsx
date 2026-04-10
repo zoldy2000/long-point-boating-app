@@ -2,12 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const ZOOM = 11;
 const MAP_CONFIG = {
-  cols: 4,
+  cols: 5,
   rows: 3,
   tileSize: 256,
+  center: { lat: 42.585, lon: -80.29 },
 };
-
-const MAP_CENTER = { lat: 42.585, lon: -80.36 };
 
 const LENGTH_RANGES = [
   { value: "15-18", label: "15–18 ft", boatLengthFt: 17 },
@@ -19,17 +18,11 @@ const LENGTH_RANGES = [
 
 function todayString() {
   const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function toYmd(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 function windowHours(block) {
@@ -66,17 +59,25 @@ function degToCompass(deg) {
 
 function windFromUv(u, v) {
   const speed = Math.sqrt(u * u + v * v);
-  const deg = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
-  return { speed, direction: degToCompass(deg) };
+  const toDeg = (Math.atan2(u, v) * 180) / Math.PI;
+  const fromDeg = (toDeg + 180 + 360) % 360;
+  return { speed, direction: degToCompass(fromDeg) };
 }
 
-function formatWindRange(range) {
+function formatWindRange(range, units) {
   if (!range) return "—";
+  if (units === "metric") {
+    return `${Math.round(range.min)}-${Math.round(range.max)} m/s`;
+  }
   return `${Math.round(mpsToMph(range.min))}-${Math.round(mpsToMph(range.max))} mph`;
 }
 
-function formatWaveRange(range) {
+function formatWaveRange(range, units) {
   if (!range) return "—";
+  if (units === "metric") {
+    if (Math.abs(range.min - range.max) < 0.08) return `${range.min.toFixed(1)} m`;
+    return `${range.min.toFixed(1)}-${range.max.toFixed(1)} m`;
+  }
   const min = mToFt(range.min);
   const max = mToFt(range.max);
   if (Math.abs(min - max) < 0.15) return `${min.toFixed(1)} ft`;
@@ -116,22 +117,29 @@ function labelFromScore(score) {
 function classifySpot(lat, lon) {
   if (lat > 42.615) return "More exposed water";
   if (lon < -80.42) return "West side";
-  if (lon > -80.30) return "East side";
+  if (lon > -80.24) return "East side";
   return "Central bay";
 }
 
-function reasonFromForecast({ spotName, windDir, waveAvg, gustAvg, boatLengthFt, score }) {
-  const waveFt = mToFt(waveAvg || 0);
-  const gustMph = Math.round(mpsToMph(gustAvg || 0));
+function reasonFromForecast({ spotName, windDir, waveAvg, gustAvg, boatLengthFt, score, units }) {
+  const waveText =
+    units === "metric"
+      ? `${(waveAvg || 0).toFixed(1)} m`
+      : `${mToFt(waveAvg || 0).toFixed(1)} ft`;
+
+  const gustText =
+    units === "metric"
+      ? `${Math.round(gustAvg || 0)} m/s`
+      : `${Math.round(mpsToMph(gustAvg || 0))} mph`;
 
   if (score >= 8) {
     return `${spotName} looks manageable for about a ${boatLengthFt} ft family boat. Wind is ${windDir} here and forecast waves remain relatively modest at this clicked point.`;
   }
   if (score >= 6) {
-    return `${spotName} should still be usable, but expect some chop. ${windDir} wind with gusts near ${gustMph} mph may make the ride less comfortable.`;
+    return `${spotName} should still be usable, but expect some chop. ${windDir} wind with gusts near ${gustText} may make the ride less comfortable.`;
   }
   if (score >= 4) {
-    return `${spotName} is getting into caution territory. Forecast waves around ${waveFt.toFixed(1)} ft may feel uncomfortable for many family boats around ${boatLengthFt} ft.`;
+    return `${spotName} is getting into caution territory. Forecast waves around ${waveText} may feel uncomfortable for many family boats around ${boatLengthFt} ft.`;
   }
   return `${spotName} looks poor for a family boat around ${boatLengthFt} ft. This clicked spot is likely too rough or uncomfortable in this setup.`;
 }
@@ -165,7 +173,11 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
   const u = windJson["wind_u-surface"] || [];
   const v = windJson["wind_v-surface"] || [];
   const gust = windJson["gust-surface"] || [];
-  const waveHeight = waveJson["waves_height-surface"] || [];
+  const waveHeight =
+    waveJson["waves_height-surface"] ||
+    waveJson["waves-surface"] ||
+    waveJson.waves_height ||
+    [];
 
   const indexes = ts
     .map((stamp, idx) => ({ idx, date: new Date(stamp) }))
@@ -190,9 +202,9 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
     gustAvg,
     waveAvg,
     windDir: avgWindVector.direction,
-    wind: formatWindRange(windSpeedRange),
-    gusts: formatWindRange(gustRange),
-    waves: formatWaveRange(waveRange),
+    wind: windSpeedRange,
+    gusts: gustRange,
+    waves: waveRange,
   };
 }
 
@@ -200,7 +212,7 @@ function latLonToTile(lat, lon, zoom) {
   const n = 2 ** zoom;
   const x = ((lon + 180) / 360) * n;
   const latRad = (lat * Math.PI) / 180;
-  const y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+  const y = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
   return { x, y };
 }
 
@@ -213,7 +225,7 @@ function tileToLatLon(x, y, zoom) {
 }
 
 function buildTileGrid() {
-  const center = latLonToTile(MAP_CENTER.lat, MAP_CENTER.lon, ZOOM);
+  const center = latLonToTile(MAP_CONFIG.center.lat, MAP_CONFIG.center.lon, ZOOM);
   const startX = Math.floor(center.x - MAP_CONFIG.cols / 2);
   const startY = Math.floor(center.y - MAP_CONFIG.rows / 2);
   const tiles = [];
@@ -237,19 +249,16 @@ const TILE_GRID = buildTileGrid();
 
 function markerStyleFromLatLon(lat, lon) {
   const tile = latLonToTile(lat, lon, ZOOM);
-  const xPx = (tile.x - TILE_GRID.startX) * MAP_CONFIG.tileSize;
-  const yPx = (tile.y - TILE_GRID.startY) * MAP_CONFIG.tileSize;
-  return {
-    left: `${xPx}px`,
-    top: `${yPx}px`,
-  };
+  const leftPct = ((tile.x - TILE_GRID.startX) / MAP_CONFIG.cols) * 100;
+  const topPct = ((tile.y - TILE_GRID.startY) / MAP_CONFIG.rows) * 100;
+  return { left: `${leftPct}%`, top: `${topPct}%` };
 }
 
 function clickToLatLon(clientX, clientY, rect) {
-  const xPx = clientX - rect.left;
-  const yPx = clientY - rect.top;
-  const tileX = TILE_GRID.startX + xPx / MAP_CONFIG.tileSize;
-  const tileY = TILE_GRID.startY + yPx / MAP_CONFIG.tileSize;
+  const xPct = (clientX - rect.left) / rect.width;
+  const yPct = (clientY - rect.top) / rect.height;
+  const tileX = TILE_GRID.startX + xPct * MAP_CONFIG.cols;
+  const tileY = TILE_GRID.startY + yPct * MAP_CONFIG.rows;
   return tileToLatLon(tileX, tileY, ZOOM);
 }
 
@@ -257,6 +266,7 @@ export default function App() {
   const [tripDate, setTripDate] = useState(todayString());
   const [timeBlock, setTimeBlock] = useState("afternoon");
   const [lengthRange, setLengthRange] = useState("19-21");
+  const [units, setUnits] = useState("imperial");
   const [selectedPoint, setSelectedPoint] = useState({ lat: 42.603, lon: -80.345 });
   const [pointData, setPointData] = useState({ status: "idle", message: "", forecast: null });
   const mapRef = useRef(null);
@@ -316,10 +326,11 @@ export default function App() {
         gustAvg: pointData.forecast.gustAvg,
         boatLengthFt,
         score,
+        units,
       }),
       spotName,
     };
-  }, [pointData.forecast, boatLengthFt, selectedPoint]);
+  }, [pointData.forecast, boatLengthFt, selectedPoint, units]);
 
   function handleMapClick(e) {
     const rect = mapRef.current?.getBoundingClientRect();
@@ -342,7 +353,7 @@ export default function App() {
         </div>
 
         <div style={{ background: "white", borderRadius: 18, padding: 16, boxShadow: "0 2px 10px rgba(0,0,0,0.08)" }}>
-          <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 1fr 1fr" }}>
+          <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
             <div>
               <label style={{ marginBottom: 6, fontWeight: 700, display: "block" }}>Date</label>
               <input type="date" value={tripDate} onChange={(e) => setTripDate(e.target.value)} style={{ width: "100%", padding: 12, borderRadius: 12, border: "1px solid #cbd5e1", boxSizing: "border-box" }} />
@@ -363,6 +374,13 @@ export default function App() {
                 ))}
               </select>
             </div>
+            <div>
+              <label style={{ marginBottom: 6, fontWeight: 700, display: "block" }}>Units</label>
+              <select value={units} onChange={(e) => setUnits(e.target.value)} style={{ width: "100%", padding: 12, borderRadius: 12, border: "1px solid #cbd5e1", background: "white" }}>
+                <option value="imperial">Imperial</option>
+                <option value="metric">Metric</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -374,17 +392,13 @@ export default function App() {
               onClick={handleMapClick}
               style={{
                 position: "relative",
-                width: MAP_CONFIG.cols * MAP_CONFIG.tileSize,
-                height: MAP_CONFIG.rows * MAP_CONFIG.tileSize,
-                maxWidth: "100%",
+                width: "100%",
+                aspectRatio: `${MAP_CONFIG.cols} / ${MAP_CONFIG.rows}`,
                 overflow: "hidden",
                 borderRadius: 16,
                 border: "1px solid #cbd5e1",
                 cursor: "crosshair",
                 background: "#dbeafe",
-                display: "grid",
-                gridTemplateColumns: `repeat(${MAP_CONFIG.cols}, ${MAP_CONFIG.tileSize}px)`,
-                gridTemplateRows: `repeat(${MAP_CONFIG.rows}, ${MAP_CONFIG.tileSize}px)`,
               }}
             >
               {TILE_GRID.tiles.map((tile) => (
@@ -392,9 +406,14 @@ export default function App() {
                   key={`${tile.x}-${tile.y}`}
                   src={tile.url}
                   alt=""
-                  style={{ width: MAP_CONFIG.tileSize, height: MAP_CONFIG.tileSize, display: "block" }}
-                  onError={(e) => {
-                    e.currentTarget.style.background = "#cbd5e1";
+                  style={{
+                    position: "absolute",
+                    left: `${(tile.col / MAP_CONFIG.cols) * 100}%`,
+                    top: `${(tile.row / MAP_CONFIG.rows) * 100}%`,
+                    width: `${100 / MAP_CONFIG.cols}%`,
+                    height: `${100 / MAP_CONFIG.rows}%`,
+                    display: "block",
+                    objectFit: "cover",
                   }}
                 />
               ))}
@@ -444,15 +463,21 @@ export default function App() {
               <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr 1fr", marginTop: 10 }}>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Wind</div>
-                  <div style={{ marginTop: 4, fontWeight: 700 }}>{pointData.forecast ? `${pointData.forecast.wind} ${pointData.forecast.windDir}` : "—"}</div>
+                  <div style={{ marginTop: 4, fontWeight: 700 }}>
+                    {pointData.forecast ? `${formatWindRange(pointData.forecast.wind, units)} ${pointData.forecast.windDir}` : "—"}
+                  </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Gusts</div>
-                  <div style={{ marginTop: 4, fontWeight: 700 }}>{pointData.forecast ? pointData.forecast.gusts : "—"}</div>
+                  <div style={{ marginTop: 4, fontWeight: 700 }}>
+                    {pointData.forecast ? formatWindRange(pointData.forecast.gusts, units) : "—"}
+                  </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Waves</div>
-                  <div style={{ marginTop: 4, fontWeight: 700 }}>{pointData.forecast ? pointData.forecast.waves : "—"}</div>
+                  <div style={{ marginTop: 4, fontWeight: 700 }}>
+                    {pointData.forecast ? formatWaveRange(pointData.forecast.waves, units) : "—"}
+                  </div>
                 </div>
               </div>
             </div>
