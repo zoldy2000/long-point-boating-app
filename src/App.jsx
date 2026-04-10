@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const MAP_BOUNDS = {
-  north: 42.69,
-  south: 42.49,
-  west: -80.54,
-  east: -80.14,
+const ZOOM = 11;
+const MAP_CONFIG = {
+  cols: 4,
+  rows: 3,
+  tileSize: 256,
 };
 
 const MAP_CENTER = { lat: 42.585, lon: -80.36 };
@@ -114,11 +114,9 @@ function labelFromScore(score) {
 }
 
 function classifySpot(lat, lon) {
-  const westThird = MAP_BOUNDS.west + (MAP_BOUNDS.east - MAP_BOUNDS.west) * 0.33;
-  const eastThird = MAP_BOUNDS.west + (MAP_BOUNDS.east - MAP_BOUNDS.west) * 0.66;
-  if (lat > 42.61) return "More exposed water";
-  if (lon <= westThird) return "West side";
-  if (lon >= eastThird) return "East side";
+  if (lat > 42.615) return "More exposed water";
+  if (lon < -80.42) return "West side";
+  if (lon > -80.30) return "East side";
   return "Central bay";
 }
 
@@ -127,7 +125,7 @@ function reasonFromForecast({ spotName, windDir, waveAvg, gustAvg, boatLengthFt,
   const gustMph = Math.round(mpsToMph(gustAvg || 0));
 
   if (score >= 8) {
-    return `${spotName} looks manageable for about a ${boatLengthFt} ft family boat. Wind is ${windDir} here and the forecasted waves remain relatively modest at this clicked point.`;
+    return `${spotName} looks manageable for about a ${boatLengthFt} ft family boat. Wind is ${windDir} here and forecast waves remain relatively modest at this clicked point.`;
   }
   if (score >= 6) {
     return `${spotName} should still be usable, but expect some chop. ${windDir} wind with gusts near ${gustMph} mph may make the ride less comfortable.`;
@@ -198,13 +196,61 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
   };
 }
 
-function latLonToMarkerStyle(lat, lon) {
-  const leftPct = ((lon - MAP_BOUNDS.west) / (MAP_BOUNDS.east - MAP_BOUNDS.west)) * 100;
-  const topPct = ((MAP_BOUNDS.north - lat) / (MAP_BOUNDS.north - MAP_BOUNDS.south)) * 100;
+function latLonToTile(lat, lon, zoom) {
+  const n = 2 ** zoom;
+  const x = ((lon + 180) / 360) * n;
+  const latRad = (lat * Math.PI) / 180;
+  const y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+  return { x, y };
+}
+
+function tileToLatLon(x, y, zoom) {
+  const n = 2 ** zoom;
+  const lon = (x / n) * 360 - 180;
+  const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n)));
+  const lat = (latRad * 180) / Math.PI;
+  return { lat, lon };
+}
+
+function buildTileGrid() {
+  const center = latLonToTile(MAP_CENTER.lat, MAP_CENTER.lon, ZOOM);
+  const startX = Math.floor(center.x - MAP_CONFIG.cols / 2);
+  const startY = Math.floor(center.y - MAP_CONFIG.rows / 2);
+  const tiles = [];
+  for (let row = 0; row < MAP_CONFIG.rows; row += 1) {
+    for (let col = 0; col < MAP_CONFIG.cols; col += 1) {
+      const x = startX + col;
+      const y = startY + row;
+      tiles.push({
+        x,
+        y,
+        col,
+        row,
+        url: `https://tile.openstreetmap.org/${ZOOM}/${x}/${y}.png`,
+      });
+    }
+  }
+  return { tiles, startX, startY };
+}
+
+const TILE_GRID = buildTileGrid();
+
+function markerStyleFromLatLon(lat, lon) {
+  const tile = latLonToTile(lat, lon, ZOOM);
+  const xPx = (tile.x - TILE_GRID.startX) * MAP_CONFIG.tileSize;
+  const yPx = (tile.y - TILE_GRID.startY) * MAP_CONFIG.tileSize;
   return {
-    left: `${leftPct}%`,
-    top: `${topPct}%`,
+    left: `${xPx}px`,
+    top: `${yPx}px`,
   };
+}
+
+function clickToLatLon(clientX, clientY, rect) {
+  const xPx = clientX - rect.left;
+  const yPx = clientY - rect.top;
+  const tileX = TILE_GRID.startX + xPx / MAP_CONFIG.tileSize;
+  const tileY = TILE_GRID.startY + yPx / MAP_CONFIG.tileSize;
+  return tileToLatLon(tileX, tileY, ZOOM);
 }
 
 export default function App() {
@@ -278,18 +324,11 @@ export default function App() {
   function handleMapClick(e) {
     const rect = mapRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-
-    const lon = MAP_BOUNDS.west + x * (MAP_BOUNDS.east - MAP_BOUNDS.west);
-    const lat = MAP_BOUNDS.north - y * (MAP_BOUNDS.north - MAP_BOUNDS.south);
-
-    setSelectedPoint({ lat, lon });
+    const next = clickToLatLon(e.clientX, e.clientY, rect);
+    setSelectedPoint({ lat: next.lat, lon: next.lon });
   }
 
-  const markerStyle = latLonToMarkerStyle(selectedPoint.lat, selectedPoint.lon);
-
-  const mapUrl = `https://staticmap.openstreetmap.de/staticmap.php?center=${MAP_CENTER.lat},${MAP_CENTER.lon}&zoom=11&size=900x620&maptype=mapnik`;
+  const markerStyle = markerStyleFromLatLon(selectedPoint.lat, selectedPoint.lon);
 
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc", padding: 16, fontFamily: "Arial, sans-serif", color: "#0f172a" }}>
@@ -335,20 +374,37 @@ export default function App() {
               onClick={handleMapClick}
               style={{
                 position: "relative",
-                height: 620,
+                width: MAP_CONFIG.cols * MAP_CONFIG.tileSize,
+                height: MAP_CONFIG.rows * MAP_CONFIG.tileSize,
+                maxWidth: "100%",
                 overflow: "hidden",
                 borderRadius: 16,
                 border: "1px solid #cbd5e1",
                 cursor: "crosshair",
-                background: "#e2e8f0",
+                background: "#dbeafe",
+                display: "grid",
+                gridTemplateColumns: `repeat(${MAP_CONFIG.cols}, ${MAP_CONFIG.tileSize}px)`,
+                gridTemplateRows: `repeat(${MAP_CONFIG.rows}, ${MAP_CONFIG.tileSize}px)`,
               }}
             >
-              <img src={mapUrl} alt="Long Point Bay map" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+              {TILE_GRID.tiles.map((tile) => (
+                <img
+                  key={`${tile.x}-${tile.y}`}
+                  src={tile.url}
+                  alt=""
+                  style={{ width: MAP_CONFIG.tileSize, height: MAP_CONFIG.tileSize, display: "block" }}
+                  onError={(e) => {
+                    e.currentTarget.style.background = "#cbd5e1";
+                  }}
+                />
+              ))}
+
               <div
                 style={{
                   position: "absolute",
                   transform: "translate(-50%, -100%)",
-                  ...markerStyle,
+                  left: markerStyle.left,
+                  top: markerStyle.top,
                   pointerEvents: "none",
                 }}
               >
