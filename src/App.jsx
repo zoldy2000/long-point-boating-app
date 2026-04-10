@@ -27,18 +27,24 @@ const STARTER_BOATS = [
   { id: "2", lengthFt: 24, type: "Pontoon" },
 ];
 
-function useLocalState(key, fallback) {
+function useLocalState(key, fallback, legacyKeys = []) {
   const [value, setValue] = useState(() => {
     try {
-      const raw = window.localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
+      const keys = [key, ...legacyKeys];
+      for (const k of keys) {
+        const raw = window.localStorage.getItem(k);
+        if (raw !== null) return JSON.parse(raw);
+      }
+      return fallback;
     } catch {
       return fallback;
     }
   });
+
   useEffect(() => {
     try { window.localStorage.setItem(key, JSON.stringify(value)); } catch {}
   }, [key, value]);
+
   return [value, setValue];
 }
 
@@ -57,18 +63,16 @@ function getWindowHours(dateStr, block) {
   for (let h = cfg.startHour; h <= cfg.endHour; h += 1) {
     const d = new Date(base);
     d.setHours(h, 0, 0, 0);
-    arr.push(d.toISOString());
+    arr.push(d.getTime());
   }
   return arr;
 }
 
 function closestIndexes(hours, targets) {
-  const ts = hours.map((h) => new Date(h).getTime());
-  return targets.map((targetIso) => {
-    const target = new Date(targetIso).getTime();
+  return targets.map((target) => {
     let bestIdx = 0;
     let bestDiff = Infinity;
-    ts.forEach((t, i) => {
+    hours.forEach((t, i) => {
       const diff = Math.abs(t - target);
       if (diff < bestDiff) {
         bestDiff = diff;
@@ -112,14 +116,14 @@ const styles = {
 };
 
 export default function App() {
-  const [screen, setScreen] = useLocalState("lp-screen", "home");
-  const [date, setDate] = useLocalState("lp-date", todayStr());
-  const [block, setBlock] = useLocalState("lp-block", "afternoon");
-  const [area, setArea] = useLocalState("lp-area", "outer");
-  const [selectedBoatId, setSelectedBoatId] = useLocalState("lp-boat-id", "1");
-  const [boats, setBoats] = useLocalState("lp-boats", STARTER_BOATS);
-  const [pending, setPending] = useLocalState("lp-pending", []);
-  const [doneTrips, setDoneTrips] = useLocalState("lp-doneTrips", []);
+  const [screen, setScreen] = useLocalState("lp-screen", "home", ["lp2-screen", "lp3-screen"]);
+  const [date, setDate] = useLocalState("lp-date", todayStr(), ["lp2-trip-date", "lp3-trip-date"]);
+  const [block, setBlock] = useLocalState("lp-block", "afternoon", ["lp2-time-block", "lp3-time-block"]);
+  const [area, setArea] = useLocalState("lp-area", "outer", ["lp2-area", "lp3-area"]);
+  const [selectedBoatId, setSelectedBoatId] = useLocalState("lp-boat-id", "1", ["lp2-boat-id", "lp3-boat-id", "lp-selected-boat"]);
+  const [boats, setBoats] = useLocalState("lp-boats", STARTER_BOATS, ["lp2-boats", "lp3-boats"]);
+  const [pending, setPending] = useLocalState("lp-pending", [], ["lp2-pending-trips", "lp3-pending-trips"]);
+  const [doneTrips, setDoneTrips] = useLocalState("lp-doneTrips", [], ["lp2-completed-trips", "lp3-doneTrips", "lp3-completed-trips"]);
 
   const [tripScore, setTripScore] = useState("6");
   const [tripWave, setTripWave] = useState("2-3 ft");
@@ -154,42 +158,69 @@ export default function App() {
 
     const targets = getWindowHours(date, block);
 
-    fetch("https://api.windy.com/api/point-forecast/v2", {
+    const windReq = fetch("https://api.windy.com/api/point-forecast/v2", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-windy-api-key": key },
       body: JSON.stringify({
         lat: LONG_POINT.lat,
         lon: LONG_POINT.lon,
         model: "gfs",
-        parameters: ["wind", "windGust", "waves", "wavesHeight", "windDir"],
+        parameters: ["wind", "windGust"],
         levels: ["surface"],
         key,
       }),
-    })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`Windy request failed: ${res.status}`);
-        return res.json();
-      })
-      .then((payload) => {
-        const hours = payload.ts || payload.hours || [];
-        const idxs = closestIndexes(hours, targets);
-        const windU = payload["wind_u-surface"] || payload.wind_u || [];
-        const windV = payload["wind_v-surface"] || payload.wind_v || [];
-        const gust = payload["gust-surface"] || payload["windGust-surface"] || payload.gust || [];
-        const windDir = payload["windDir-surface"] || payload.windDir || [];
-        const waves = payload["waves_height-surface"] || payload["wavesHeight-surface"] || payload.wavesHeight || payload.waves_height || [];
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`Windy wind request failed: ${res.status}`);
+      return res.json();
+    });
 
-        const windSpeeds = idxs.map((i) => {
+    const waveReq = fetch("https://api.windy.com/api/point-forecast/v2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-windy-api-key": key },
+      body: JSON.stringify({
+        lat: LONG_POINT.lat,
+        lon: LONG_POINT.lon,
+        model: "gfsWave",
+        parameters: ["waves"],
+        key,
+      }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`Windy wave request failed: ${res.status}`);
+      return res.json();
+    });
+
+    Promise.all([windReq, waveReq])
+      .then(([windPayload, wavePayload]) => {
+        const windHours = (windPayload.ts || []).map((t) => Number(t));
+        const waveHours = (wavePayload.ts || []).map((t) => Number(t));
+
+        const windIdxs = closestIndexes(windHours, targets);
+        const waveIdxs = closestIndexes(waveHours, targets);
+
+        const windU = windPayload["wind_u-surface"] || windPayload.wind_u || [];
+        const windV = windPayload["wind_v-surface"] || windPayload.wind_v || [];
+        const gust = windPayload["gust-surface"] || windPayload.gust || [];
+        const waveHeights = wavePayload["waves_height-surface"] || [];
+
+        const windSpeeds = windIdxs.map((i) => {
           const u = windU[i];
           const v = windV[i];
           return typeof u === "number" && typeof v === "number" ? Math.sqrt(u * u + v * v) : null;
         });
 
+        const windDirs = windIdxs.map((i) => {
+          const u = windU[i];
+          const v = windV[i];
+          if (typeof u !== "number" || typeof v !== "number") return null;
+          const deg = (270 - Math.atan2(v, u) * 180 / Math.PI) % 360;
+          return deg < 0 ? deg + 360 : deg;
+        });
+
         setForecast({
           windAvg: avg(windSpeeds),
-          gustAvg: avg(idxs.map((i) => gust[i])),
-          dirAvg: avg(idxs.map((i) => windDir[i])),
-          waveAvg: avg(idxs.map((i) => waves[i])),
+          gustAvg: avg(windIdxs.map((i) => gust[i])),
+          dirAvg: avg(windDirs),
+          waveAvg: avg(waveIdxs.map((i) => waveHeights[i])),
         });
       })
       .catch((e) => {
@@ -199,7 +230,7 @@ export default function App() {
       .finally(() => setLoading(false));
   }, [date, block]);
 
-  const predictedScore = useMemo(() => {
+  const predictedScore = React.useMemo(() => {
     const boatLengthFt = Number(selectedBoat?.lengthFt || 21);
     const waveFt = forecast?.waveAvg != null ? metersToFeet(forecast.waveAvg) : 0;
     let score = area === "inner" ? 8 : area === "mixed" ? 6 : 5;
@@ -215,7 +246,7 @@ export default function App() {
     return Math.max(1, Math.min(10, score));
   }, [forecast, area, selectedBoat]);
 
-  const personalScore = useMemo(() => {
+  const personalScore = React.useMemo(() => {
     if (!doneTrips.length) return 6;
     const average = doneTrips.reduce((sum, t) => sum + Number(t.score), 0) / doneTrips.length;
     return Math.round(average * 10) / 10;
@@ -285,7 +316,7 @@ export default function App() {
         <div style={styles.hero}>
           <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#cbd5e1" }}>Live app</div>
           <h1 style={{ margin: "8px 0 0 0" }}>Long Point Bay Boating Score</h1>
-          <p style={{ margin: "10px 0 0 0", color: "#cbd5e1" }}>Boats can now be edited and deleted, and longer boats score better instead of worse.</p>
+          <p style={{ margin: "10px 0 0 0", color: "#cbd5e1" }}>Fixes the Windy error and restores old saved boats from earlier versions.</p>
         </div>
 
         <div style={{ ...styles.card, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -300,7 +331,6 @@ export default function App() {
           <>
             <div style={styles.card}>
               <h2 style={{ marginTop: 0 }}>Plan your boating window</h2>
-
               <label style={styles.label}>Date</label>
               <input style={styles.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
 
@@ -325,9 +355,7 @@ export default function App() {
                 <label style={styles.label}>Time window</label>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
                   {["morning", "afternoon", "evening"].map((b) => (
-                    <button key={b} onClick={() => setBlock(b)} style={block === b ? styles.primary : styles.secondary}>
-                      {b}
-                    </button>
+                    <button key={b} onClick={() => setBlock(b)} style={block === b ? styles.primary : styles.secondary}>{b}</button>
                   ))}
                 </div>
               </div>
@@ -359,9 +387,6 @@ export default function App() {
                 <div style={{ textAlign: "center" }}><div style={{ fontSize: 30, fontWeight: 700 }}>{predictedScore}</div><div>Predicted</div></div>
                 <div style={{ textAlign: "center" }}><div style={{ fontSize: 30, fontWeight: 700 }}>{personalScore}</div><div>Your Score</div></div>
                 <div style={{ textAlign: "center" }}><div style={{ fontSize: 30, fontWeight: 700 }}>{area === "inner" ? 8 : area === "mixed" ? 6 : 5}</div><div>All Users</div></div>
-              </div>
-              <div style={{ marginTop: 12, background: "#f8fafc", padding: 12, borderRadius: 12 }}>
-                <strong>Boat effect:</strong> longer boats now raise the score slightly instead of lowering it.
               </div>
             </div>
 
