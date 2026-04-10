@@ -30,16 +30,18 @@ function getWindowHours(dateStr, block) {
   for (let h = cfg.startHour; h <= cfg.endHour; h += 1) {
     const d = new Date(base);
     d.setHours(h, 0, 0, 0);
-    arr.push(d.getTime());
+    arr.push(d.toISOString());
   }
   return arr;
 }
 
 function closestIndexes(hours, targets) {
-  return targets.map((target) => {
+  const ts = hours.map((h) => new Date(h).getTime());
+  return targets.map((targetIso) => {
+    const target = new Date(targetIso).getTime();
     let bestIdx = 0;
     let bestDiff = Infinity;
-    hours.forEach((t, i) => {
+    ts.forEach((t, i) => {
       const diff = Math.abs(t - target);
       if (diff < bestDiff) {
         bestDiff = diff;
@@ -107,73 +109,55 @@ export default function App() {
       return;
     }
 
+    const targets = getWindowHours(date, block);
     setLoading(true);
     setErr("");
 
-    const targets = getWindowHours(date, block);
-
-    const windReq = fetch("https://api.windy.com/api/point-forecast/v2", {
+    fetch("https://api.windy.com/api/point-forecast/v2", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-windy-api-key": key },
+      headers: {
+        "Content-Type": "application/json",
+        "x-windy-api-key": key,
+      },
       body: JSON.stringify({
         lat: LONG_POINT.lat,
         lon: LONG_POINT.lon,
         model: "gfs",
-        parameters: ["wind", "windGust"],
+        parameters: ["wind", "windGust", "waves", "wavesHeight", "windDir"],
         levels: ["surface"],
         key,
       }),
-    }).then(async (res) => {
-      if (!res.ok) throw new Error(`Windy wind request failed: ${res.status}`);
-      return res.json();
-    });
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Windy request failed: ${res.status}`);
+        return res.json();
+      })
+      .then((payload) => {
+        const hours = payload.ts || payload.hours || [];
+        const idxs = closestIndexes(hours, targets);
 
-    const waveReq = fetch("https://api.windy.com/api/point-forecast/v2", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-windy-api-key": key },
-      body: JSON.stringify({
-        lat: LONG_POINT.lat,
-        lon: LONG_POINT.lon,
-        model: "gfsWave",
-        parameters: ["waves"],
-        key,
-      }),
-    }).then(async (res) => {
-      if (!res.ok) throw new Error(`Windy wave request failed: ${res.status}`);
-      return res.json();
-    });
+        const windU = payload["wind_u-surface"] || payload.wind_u || [];
+        const windV = payload["wind_v-surface"] || payload.wind_v || [];
+        const gust = payload["gust-surface"] || payload["windGust-surface"] || payload.gust || [];
+        const windDir = payload["windDir-surface"] || payload.windDir || [];
+        const waves =
+          payload["waves_height-surface"] ||
+          payload["wavesHeight-surface"] ||
+          payload.wavesHeight ||
+          payload.waves_height ||
+          [];
 
-    Promise.all([windReq, waveReq])
-      .then(([windPayload, wavePayload]) => {
-        const windHours = (windPayload.ts || []).map((t) => Number(t));
-        const waveHours = (wavePayload.ts || []).map((t) => Number(t));
-        const windIdxs = closestIndexes(windHours, targets);
-        const waveIdxs = closestIndexes(waveHours, targets);
-
-        const windU = windPayload["wind_u-surface"] || windPayload.wind_u || [];
-        const windV = windPayload["wind_v-surface"] || windPayload.wind_v || [];
-        const gust = windPayload["gust-surface"] || windPayload.gust || [];
-        const waveHeights = wavePayload["waves_height-surface"] || [];
-
-        const windSpeeds = windIdxs.map((i) => {
+        const windSpeeds = idxs.map((i) => {
           const u = windU[i];
           const v = windV[i];
           return typeof u === "number" && typeof v === "number" ? Math.sqrt(u * u + v * v) : null;
         });
 
-        const windDirs = windIdxs.map((i) => {
-          const u = windU[i];
-          const v = windV[i];
-          if (typeof u !== "number" || typeof v !== "number") return null;
-          const deg = (270 - Math.atan2(v, u) * 180 / Math.PI) % 360;
-          return deg < 0 ? deg + 360 : deg;
-        });
-
         setForecast({
           windAvg: avg(windSpeeds),
-          gustAvg: avg(windIdxs.map((i) => gust[i])),
-          dirAvg: avg(windDirs),
-          waveAvg: avg(waveIdxs.map((i) => waveHeights[i])),
+          gustAvg: avg(idxs.map((i) => gust[i])),
+          dirAvg: avg(idxs.map((i) => windDir[i])),
+          waveAvg: avg(idxs.map((i) => waves[i])),
         });
       })
       .catch((e) => {
