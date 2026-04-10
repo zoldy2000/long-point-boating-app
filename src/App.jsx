@@ -1,328 +1,219 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 
-const AREA_COORDS = {
-  inner: { lat: 42.586, lon: -80.424, label: 'Inner Bay' },
-  outer: { lat: 42.629, lon: -80.318, label: 'Outer Bay' }
-};
-
-const LENGTH_RANGES = [
-  { value: '15-18', label: '15–18 ft', boatLengthFt: 17 },
-  { value: '19-21', label: '19–21 ft', boatLengthFt: 20 },
-  { value: '22-24', label: '22–24 ft', boatLengthFt: 23 },
-  { value: '25-27', label: '25–27 ft', boatLengthFt: 26 },
-  { value: '28-30', label: '28–30 ft', boatLengthFt: 29 }
+const zones = [
+  {
+    id: 'inner-west',
+    name: 'Inner Bay West',
+    area: 'Inner Bay',
+    points: '90,270 170,235 185,285 105,315',
+    exposure: { W: 2, SW: 2, S: 1, SE: 0, E: 0, NE: 0, N: 0, NW: 1 },
+    notes: 'More protected in many east and northeast setups. Can still get lumpy with stronger west and southwest wind.',
+  },
+  {
+    id: 'inner-central',
+    name: 'Inner Bay Central',
+    area: 'Inner Bay',
+    points: '185,285 170,235 265,215 285,275 220,310',
+    exposure: { W: 1, SW: 1, S: 1, SE: 1, E: 1, NE: 0, N: 0, NW: 1 },
+    notes: 'Middle of Inner Bay. Usually moderate rather than extreme unless the wind is sustained and aligned across open water.',
+  },
+  {
+    id: 'inner-east',
+    name: 'Inner Bay East',
+    area: 'Inner Bay',
+    points: '285,275 265,215 355,205 380,255 335,300',
+    exposure: { W: 0, SW: 0, S: 1, SE: 2, E: 2, NE: 1, N: 0, NW: 0 },
+    notes: 'Can be calmer in west wind but more exposed when easterly wind pushes across this side of the bay.',
+  },
+  {
+    id: 'outer-west',
+    name: 'Outer Bay West',
+    area: 'Outer Bay',
+    points: '390,160 500,135 510,195 420,225',
+    exposure: { W: 2, SW: 3, S: 2, SE: 1, E: 0, NE: 0, N: 0, NW: 1 },
+    notes: 'Western Outer Bay tends to worsen quickly in southwest wind. Often one of the first outer sections to feel uncomfortable for family boats.',
+  },
+  {
+    id: 'outer-central',
+    name: 'Outer Bay Central',
+    area: 'Outer Bay',
+    points: '420,225 510,195 575,230 510,285 430,285',
+    exposure: { W: 1, SW: 2, S: 2, SE: 2, E: 1, NE: 0, N: 0, NW: 1 },
+    notes: 'A broad open-water zone. More exposed than Inner Bay in almost every setup and often a good indicator of general ride comfort.',
+  },
+  {
+    id: 'outer-east',
+    name: 'Outer Bay East',
+    area: 'Outer Bay',
+    points: '575,230 655,215 700,255 640,305 510,285',
+    exposure: { W: 0, SW: 1, S: 2, SE: 3, E: 3, NE: 2, N: 1, NW: 0 },
+    notes: 'Eastern Outer Bay gets hit harder in east and southeast patterns. Can look much better than the west side in strong west wind.',
+  },
+  {
+    id: 'bay-mouth',
+    name: 'Bay Mouth / Most Exposed Water',
+    area: 'Outer Bay',
+    points: '355,205 390,160 420,225 380,255',
+    exposure: { W: 2, SW: 3, S: 3, SE: 3, E: 2, NE: 2, N: 1, NW: 1 },
+    notes: 'This is one of the most sensitive parts of the bay system. It can deteriorate quickly and often deserves separate caution from the rest of the bay.',
+  },
 ];
 
-function todayString() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+const windDirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const windBands = [
+  { value: 10, label: 'Under 10 mph' },
+  { value: 15, label: '10–15 mph' },
+  { value: 20, label: '15–20 mph' },
+  { value: 25, label: '20–25 mph' },
+  { value: 30, label: '25–30 mph' },
+];
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
 }
 
-function toYmd(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+function zoneScore(zone, dir, wind) {
+  const exposure = zone.exposure[dir] ?? 1;
+  const windFactor = wind <= 10 ? 0 : wind <= 15 ? 1 : wind <= 20 ? 2 : wind <= 25 ? 3 : 4;
+  let score = 9 - exposure * 1.4 - windFactor * 1.1;
+  if (zone.area === 'Outer Bay') score -= 0.4;
+  if (zone.id === 'bay-mouth') score -= 0.8;
+  return Math.round(clamp(score, 1, 10));
 }
 
-function windowHours(block) {
-  if (block === 'morning') return [8, 11];
-  if (block === 'afternoon') return [12, 16];
-  return [17, 20];
+function colorForScore(score) {
+  if (score >= 8) return '#22c55e';
+  if (score >= 6) return '#84cc16';
+  if (score >= 4) return '#f59e0b';
+  if (score >= 3) return '#f97316';
+  return '#ef4444';
 }
 
-function avg(values) {
-  const clean = values.filter((v) => Number.isFinite(v));
-  if (!clean.length) return null;
-  return clean.reduce((sum, v) => sum + v, 0) / clean.length;
+function labelForScore(score) {
+  if (score >= 8) return 'Good';
+  if (score >= 6) return 'Usable';
+  if (score >= 4) return 'Caution';
+  return 'Poor';
 }
 
-function minMax(values) {
-  const clean = values.filter((v) => Number.isFinite(v));
-  if (!clean.length) return null;
-  return { min: Math.min(...clean), max: Math.max(...clean) };
-}
+export default function LongPointBayMapPrototype() {
+  const [windDir, setWindDir] = useState('SW');
+  const [windSpeed, setWindSpeed] = useState(20);
+  const [selectedZoneId, setSelectedZoneId] = useState('outer-west');
 
-function mToFt(m) {
-  return m * 3.28084;
-}
+  const scoredZones = useMemo(() => {
+    return zones.map((zone) => {
+      const score = zoneScore(zone, windDir, windSpeed);
+      return {
+        ...zone,
+        score,
+        fill: colorForScore(score),
+        label: labelForScore(score),
+      };
+    });
+  }, [windDir, windSpeed]);
 
-function mpsToMph(v) {
-  return v * 2.23694;
-}
-
-function degToCompass(deg) {
-  const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-  const idx = Math.round((((deg % 360) + 360) % 360) / 45) % 8;
-  return dirs[idx];
-}
-
-function windFromUv(u, v) {
-  const speed = Math.sqrt((u ** 2) + (v ** 2));
-  const deg = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
-  return { speed, direction: degToCompass(deg) };
-}
-
-function formatWindRange(range) {
-  if (!range) return '—';
-  return `${Math.round(mpsToMph(range.min))}-${Math.round(mpsToMph(range.max))} mph`;
-}
-
-function formatWaveRange(range) {
-  if (!range) return '—';
-  const min = mToFt(range.min);
-  const max = mToFt(range.max);
-  if (Math.abs(min - max) < 0.15) return `${min.toFixed(1)} ft`;
-  return `${min.toFixed(1)}-${max.toFixed(1)} ft`;
-}
-
-function forecastScoreFromLive({ windAvg, gustAvg, waveAvg, area, boatLengthFt }) {
-  let score = 10;
-  const windMph = mpsToMph(windAvg || 0);
-  const gustMph = mpsToMph(gustAvg || 0);
-  const waveFt = mToFt(waveAvg || 0);
-
-  score -= Math.max(0, (windMph - 10) / 4);
-  score -= Math.max(0, (gustMph - 16) / 5);
-  score -= Math.max(0, (waveFt - 1) * 1.5);
-
-  if (area === 'outer') score -= 1;
-  if (boatLengthFt <= 18) score -= 1;
-  else if (boatLengthFt <= 20) score -= 0.5;
-
-  return Math.max(1, Math.min(10, Math.round(score)));
-}
-
-function labelFromScore(score) {
-  if (score >= 9) return 'Excellent ride comfort';
-  if (score >= 7) return 'Good day for many family boats';
-  if (score >= 5) return 'Usable, but expect some chop';
-  if (score >= 3) return 'Use caution';
-  return 'Poor ride comfort';
-}
-
-function cautionFromScore(score, area) {
-  if (score >= 7) return `${AREA_COORDS[area].label} looks manageable in this time window.`;
-  if (score >= 5) return `${AREA_COORDS[area].label} may still be usable, but expect a rougher ride.`;
-  return `${AREA_COORDS[area].label} may be uncomfortable for many family boats in this time window.`;
-}
-
-const styles = {
-  page: { minHeight: '100vh', background: '#f8fafc', padding: 16, fontFamily: 'Arial, sans-serif', color: '#0f172a' },
-  container: { maxWidth: 460, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16, paddingBottom: 24 },
-  hero: { borderRadius: 20, background: '#0f172a', color: 'white', padding: 20 },
-  card: { background: 'white', borderRadius: 18, padding: 16, boxShadow: '0 2px 10px rgba(0,0,0,0.08)' },
-  input: { width: '100%', padding: 12, borderRadius: 12, border: '1px solid #cbd5e1', boxSizing: 'border-box' },
-  select: { width: '100%', padding: 12, borderRadius: 12, border: '1px solid #cbd5e1', background: 'white' },
-  label: { marginBottom: 6, fontWeight: 700, display: 'block' },
-  primary: { padding: 12, borderRadius: 12, border: 0, background: '#0f172a', color: 'white', fontWeight: 700, cursor: 'pointer' },
-  secondary: { padding: 12, borderRadius: 12, border: '1px solid #cbd5e1', background: 'white', fontWeight: 700, cursor: 'pointer' }
-};
-
-export default function App() {
-  const [tripDate, setTripDate] = useState(todayString());
-  const [timeBlock, setTimeBlock] = useState('afternoon');
-  const [area, setArea] = useState('outer');
-  const [lengthRange, setLengthRange] = useState('19-21');
-  const [windyData, setWindyData] = useState({ status: 'idle', card: null, summary: null, message: '' });
-
-  const boatLengthFt = LENGTH_RANGES.find((item) => item.value === lengthRange)?.boatLengthFt || 20;
-
-  useEffect(() => {
-    let cancelled = false;
-    const key = import.meta.env.VITE_WINDY_API_KEY;
-    if (!key) {
-      setWindyData({ status: 'missing-key', card: null, summary: null, message: 'Windy key not found in app environment.' });
-      return;
-    }
-
-    const coords = AREA_COORDS[area];
-    const [startHour, endHour] = windowHours(timeBlock);
-
-    async function fetchWindy() {
-      setWindyData((prev) => ({ ...prev, status: 'loading', message: '' }));
-      try {
-        const windBody = {
-          lat: coords.lat,
-          lon: coords.lon,
-          model: 'gfs',
-          parameters: ['wind', 'windGust'],
-          levels: ['surface'],
-          key
-        };
-
-        const wavesBody = {
-          lat: coords.lat,
-          lon: coords.lon,
-          model: 'gfsWave',
-          parameters: ['waves'],
-          levels: ['surface'],
-          key
-        };
-
-        const [windResp, waveResp] = await Promise.all([
-          fetch('https://api.windy.com/api/point-forecast/v2', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(windBody)
-          }),
-          fetch('https://api.windy.com/api/point-forecast/v2', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(wavesBody)
-          })
-        ]);
-
-        if (!windResp.ok) throw new Error(`Windy wind request failed: ${windResp.status}`);
-        if (!waveResp.ok) throw new Error(`Windy wave request failed: ${waveResp.status}`);
-
-        const windJson = await windResp.json();
-        const waveJson = await waveResp.json();
-
-        const ts = windJson.ts || [];
-        const u = windJson['wind_u-surface'] || [];
-        const v = windJson['wind_v-surface'] || [];
-        const gust = windJson['gust-surface'] || [];
-        const waveHeight = waveJson['waves_height-surface'] || [];
-
-        const indexes = ts
-          .map((stamp, idx) => ({ idx, date: new Date(stamp) }))
-          .filter(({ date }) => toYmd(date) === tripDate && date.getHours() >= startHour && date.getHours() <= endHour)
-          .map(({ idx }) => idx);
-
-        if (!indexes.length) {
-          throw new Error('No Windy forecast points returned for that date and time window.');
-        }
-
-        const windVectors = indexes.map((idx) => windFromUv(u[idx], v[idx]));
-        const windSpeedRange = minMax(windVectors.map((item) => item.speed));
-        const avgWindVector = windFromUv(avg(indexes.map((idx) => u[idx])) || 0, avg(indexes.map((idx) => v[idx])) || 0);
-        const gustRange = minMax(indexes.map((idx) => gust[idx]));
-        const waveRange = minMax(indexes.map((idx) => waveHeight[idx]));
-        const waveAvg = avg(indexes.map((idx) => waveHeight[idx])) || 0;
-        const gustAvg = avg(indexes.map((idx) => gust[idx])) || 0;
-        const windAvg = avg(windVectors.map((item) => item.speed)) || 0;
-
-        const liveScore = forecastScoreFromLive({
-          windAvg,
-          gustAvg,
-          waveAvg,
-          area,
-          boatLengthFt
-        });
-
-        const card = {
-          wind: formatWindRange(windSpeedRange),
-          direction: avgWindVector.direction,
-          gusts: formatWindRange(gustRange),
-          waves: formatWaveRange(waveRange)
-        };
-
-        const summary = {
-          predicted: liveScore,
-          label: labelFromScore(liveScore),
-          caution: cautionFromScore(liveScore, area)
-        };
-
-        if (!cancelled) {
-          setWindyData({ status: 'ready', card, summary, message: '' });
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setWindyData({ status: 'error', card: null, summary: null, message: error.message || 'Windy request failed.' });
-        }
-      }
-    }
-
-    fetchWindy();
-    return () => { cancelled = true; };
-  }, [area, timeBlock, tripDate, boatLengthFt]);
+  const selectedZone = scoredZones.find((z) => z.id === selectedZoneId) || scoredZones[0];
 
   return (
-    <div style={styles.page}>
-      <div style={styles.container}>
-        <div style={styles.hero}>
-          <div style={{ fontSize: 12, letterSpacing: 2, textTransform: 'uppercase', color: '#cbd5e1' }}>Simplified version</div>
-          <h1 style={{ margin: '8px 0 0 0' }}>Long Point Bay Boating Score</h1>
-          <p style={{ margin: '10px 0 0 0', color: '#cbd5e1' }}>
-            Inner and Outer Bay only. No accounts, no saved boats, no trip logging.
-          </p>
+    <div className="min-h-screen bg-slate-50 p-4 text-slate-900">
+      <div className="mx-auto flex max-w-5xl flex-col gap-4">
+        <div className="rounded-3xl bg-slate-900 p-5 text-white shadow-lg">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-300">Map prototype</div>
+          <h1 className="mt-1 text-2xl font-semibold">Long Point Bay exposure map</h1>
+          <p className="mt-2 text-sm text-slate-300">Whole-bay color map for Inner and Outer Bay with click-to-explain zones.</p>
         </div>
 
-        <div style={styles.card}>
-          <h2 style={{ marginTop: 0 }}>Check conditions</h2>
-
-          <label style={styles.label}>Date</label>
-          <input style={styles.input} type="date" value={tripDate} onChange={(e) => setTripDate(e.target.value)} />
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
-            <div>
-              <label style={styles.label}>Area</label>
-              <select style={styles.select} value={area} onChange={(e) => setArea(e.target.value)}>
-                <option value="inner">Inner Bay</option>
-                <option value="outer">Outer Bay</option>
-              </select>
-            </div>
-
-            <div>
-              <label style={styles.label}>Boat length range</label>
-              <select style={styles.select} value={lengthRange} onChange={(e) => setLengthRange(e.target.value)}>
-                {LENGTH_RANGES.map((r) => (
-                  <option key={r.value} value={r.value}>{r.label}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <label style={styles.label}>Time window</label>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-              {['morning', 'afternoon', 'evening'].map((b) => (
-                <button key={b} onClick={() => setTimeBlock(b)} style={timeBlock === b ? styles.primary : styles.secondary}>
-                  {b}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div style={styles.card}>
-          <h2 style={{ marginTop: 0 }}>Forecast</h2>
-          {windyData.status === 'loading' && <div>Loading Windy forecast...</div>}
-          {windyData.status === 'error' && <div style={{ background: '#fee2e2', color: '#991b1b', padding: 12, borderRadius: 12 }}>{windyData.message}</div>}
-          {windyData.status === 'missing-key' && <div style={{ background: '#fee2e2', color: '#991b1b', padding: 12, borderRadius: 12 }}>{windyData.message}</div>}
-
-          <div style={{ display: 'grid', gap: 10 }}>
-            <div style={{ background: '#f8fafc', padding: 12, borderRadius: 12 }}>
-              <div style={{ color: '#64748b', fontSize: 14 }}>Wind</div>
-              <div style={{ fontWeight: 700, marginTop: 4 }}>{windyData.card ? `${windyData.card.wind} ${windyData.card.direction}` : '—'}</div>
-            </div>
-            <div style={{ background: '#f8fafc', padding: 12, borderRadius: 12 }}>
-              <div style={{ color: '#64748b', fontSize: 14 }}>Gusts</div>
-              <div style={{ fontWeight: 700, marginTop: 4 }}>{windyData.card ? windyData.card.gusts : '—'}</div>
-            </div>
-            <div style={{ background: '#f8fafc', padding: 12, borderRadius: 12 }}>
-              <div style={{ color: '#64748b', fontSize: 14 }}>Waves</div>
-              <div style={{ fontWeight: 700, marginTop: 4 }}>{windyData.card ? windyData.card.waves : '—'}</div>
-            </div>
-          </div>
-        </div>
-
-        <div style={styles.card}>
-          <h2 style={{ marginTop: 0 }}>Prediction</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'center' }}>
-            <div style={{ textAlign: 'center', background: '#f8fafc', borderRadius: 16, padding: 16 }}>
-              <div style={{ fontSize: 40, fontWeight: 700 }}>{windyData.summary ? windyData.summary.predicted : '—'}</div>
-              <div>Score / 10</div>
-            </div>
-            <div style={{ background: '#f8fafc', borderRadius: 16, padding: 16 }}>
-              <div style={{ fontWeight: 700, fontSize: 18 }}>{windyData.summary ? windyData.summary.label : 'Waiting for forecast'}</div>
-              <div style={{ marginTop: 8, color: '#64748b' }}>
-                {windyData.summary ? windyData.summary.caution : 'Pick a date and time window to load the forecast.'}
+        <div className="grid gap-4 lg:grid-cols-[1.4fr_0.9fr]">
+          <div className="rounded-3xl bg-white p-4 shadow-sm">
+            <div className="mb-4 grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-700">Wind direction</label>
+                <select
+                  value={windDir}
+                  onChange={(e) => setWindDir(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2"
+                >
+                  {windDirs.map((dir) => (
+                    <option key={dir} value={dir}>{dir}</option>
+                  ))}
+                </select>
               </div>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-700">Wind speed</label>
+                <select
+                  value={windSpeed}
+                  onChange={(e) => setWindSpeed(Number(e.target.value))}
+                  className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2"
+                >
+                  {windBands.map((band) => (
+                    <option key={band.value} value={band.value}>{band.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-slate-200 bg-sky-50 p-3">
+              <svg viewBox="0 0 760 420" className="w-full rounded-2xl bg-sky-100">
+                <path d="M40 315 C95 255, 180 215, 290 205 C350 198, 420 150, 520 135 C610 122, 700 170, 720 235 C736 288, 702 344, 640 360 C560 380, 430 368, 320 340 C230 318, 125 320, 40 315 Z" fill="#dbeafe" stroke="#94a3b8" strokeWidth="3" />
+                <path d="M65 300 C120 258, 188 230, 278 219 C325 213, 352 208, 372 203" fill="none" stroke="#64748b" strokeWidth="3" strokeDasharray="8 8" />
+                <text x="115" y="185" className="fill-slate-700 text-[16px] font-semibold">Inner Bay</text>
+                <text x="505" y="120" className="fill-slate-700 text-[16px] font-semibold">Outer Bay</text>
+
+                {scoredZones.map((zone) => (
+                  <g key={zone.id}>
+                    <polygon
+                      points={zone.points}
+                      fill={zone.fill}
+                      fillOpacity="0.78"
+                      stroke={selectedZoneId === zone.id ? '#0f172a' : '#334155'}
+                      strokeWidth={selectedZoneId === zone.id ? '4' : '2'}
+                      className="cursor-pointer transition-all"
+                      onClick={() => setSelectedZoneId(zone.id)}
+                    />
+                  </g>
+                ))}
+              </svg>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2 text-sm">
+              <div className="rounded-full bg-green-500 px-3 py-1 text-white">Good</div>
+              <div className="rounded-full bg-lime-500 px-3 py-1 text-white">Usable</div>
+              <div className="rounded-full bg-amber-500 px-3 py-1 text-white">Caution</div>
+              <div className="rounded-full bg-red-500 px-3 py-1 text-white">Poor</div>
+            </div>
+          </div>
+
+          <div className="rounded-3xl bg-white p-4 shadow-sm">
+            <div className="rounded-2xl bg-slate-50 p-4">
+              <div className="text-sm font-medium text-slate-500">Selected zone</div>
+              <div className="mt-1 text-xl font-semibold">{selectedZone.name}</div>
+              <div className="mt-1 text-sm text-slate-500">{selectedZone.area}</div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="rounded-2xl bg-slate-50 p-4 text-center">
+                <div className="text-3xl font-bold">{selectedZone.score}</div>
+                <div className="text-sm text-slate-500">Score / 10</div>
+              </div>
+              <div className="rounded-2xl bg-slate-50 p-4 text-center">
+                <div className="text-lg font-semibold">{selectedZone.label}</div>
+                <div className="text-sm text-slate-500">Condition</div>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+              <div className="text-sm font-medium text-slate-500">Why this zone got this color</div>
+              <p className="mt-2 text-sm leading-6 text-slate-700">
+                Wind is set to <strong>{windDir}</strong> at <strong>{windSpeed} mph</strong>. This zone has an exposure value of <strong>{selectedZone.exposure[windDir]}</strong> for that wind direction. {selectedZone.notes}
+              </p>
+            </div>
+
+            <div className="mt-4 rounded-2xl bg-slate-50 p-4">
+              <div className="text-sm font-medium text-slate-500">What this means</div>
+              <p className="mt-2 text-sm leading-6 text-slate-700">
+                This prototype is not pretending to know exact wave height at every point. It is showing a practical zone-based meaning of the forecast so you can compare one side of the bay against another.
+              </p>
             </div>
           </div>
         </div>
@@ -330,3 +221,10 @@ export default function App() {
     </div>
   );
 }
+'''
+
+path = Path('/mnt/data/long_point_map_prototype.jsx')
+path.write_text(code)
+print(path)
+print(path.read_text()[:200])
+Japgollypython_user_visible.exec to=python_user_visible.exec code did not parse: Error(
