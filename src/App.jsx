@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const ZOOM = 11;
+const ZOOM = 10;
 const MAP_CONFIG = {
   cols: 5,
   rows: 3,
   tileSize: 256,
-  center: { lat: 42.585, lon: -80.29 },
+  center: { lat: 42.585, lon: -80.28 },
 };
 
 const LENGTH_RANGES = [
@@ -59,16 +59,13 @@ function degToCompass(deg) {
 
 function windFromUv(u, v) {
   const speed = Math.sqrt(u * u + v * v);
-  const toDeg = (Math.atan2(u, v) * 180) / Math.PI;
-  const fromDeg = (toDeg + 180 + 360) % 360;
+  const fromDeg = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
   return { speed, direction: degToCompass(fromDeg) };
 }
 
-function formatWindRange(range, units) {
+function formatSpeedRange(range, units) {
   if (!range) return "—";
-  if (units === "metric") {
-    return `${Math.round(range.min)}-${Math.round(range.max)} m/s`;
-  }
+  if (units === "metric") return `${range.min.toFixed(1)}-${range.max.toFixed(1)} m/s`;
   return `${Math.round(mpsToMph(range.min))}-${Math.round(mpsToMph(range.max))} mph`;
 }
 
@@ -117,20 +114,18 @@ function labelFromScore(score) {
 function classifySpot(lat, lon) {
   if (lat > 42.615) return "More exposed water";
   if (lon < -80.42) return "West side";
-  if (lon > -80.24) return "East side";
+  if (lon > -80.22) return "East side";
   return "Central bay";
 }
 
 function reasonFromForecast({ spotName, windDir, waveAvg, gustAvg, boatLengthFt, score, units }) {
-  const waveText =
-    units === "metric"
-      ? `${(waveAvg || 0).toFixed(1)} m`
-      : `${mToFt(waveAvg || 0).toFixed(1)} ft`;
+  const waveText = units === "metric"
+    ? `${(waveAvg || 0).toFixed(1)} m`
+    : `${mToFt(waveAvg || 0).toFixed(1)} ft`;
 
-  const gustText =
-    units === "metric"
-      ? `${Math.round(gustAvg || 0)} m/s`
-      : `${Math.round(mpsToMph(gustAvg || 0))} mph`;
+  const gustText = units === "metric"
+    ? `${Math.round(gustAvg || 0)} m/s`
+    : `${Math.round(mpsToMph(gustAvg || 0))} mph`;
 
   if (score >= 8) {
     return `${spotName} looks manageable for about a ${boatLengthFt} ft family boat. Wind is ${windDir} here and forecast waves remain relatively modest at this clicked point.`;
@@ -142,6 +137,18 @@ function reasonFromForecast({ spotName, windDir, waveAvg, gustAvg, boatLengthFt,
     return `${spotName} is getting into caution territory. Forecast waves around ${waveText} may feel uncomfortable for many family boats around ${boatLengthFt} ft.`;
   }
   return `${spotName} looks poor for a family boat around ${boatLengthFt} ft. This clicked spot is likely too rough or uncomfortable in this setup.`;
+}
+
+function pickSeries(obj, candidateKeys = [], containsTerms = []) {
+  for (const key of candidateKeys) {
+    if (Array.isArray(obj[key])) return obj[key];
+  }
+  for (const [key, value] of Object.entries(obj)) {
+    if (!Array.isArray(value)) continue;
+    const lower = key.toLowerCase();
+    if (containsTerms.every((term) => lower.includes(term))) return value;
+  }
+  return [];
 }
 
 async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
@@ -169,32 +176,38 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
     makeReq("gfsWave", ["waves"]),
   ]);
 
-  const ts = windJson.ts || [];
-  const u = windJson["wind_u-surface"] || [];
-  const v = windJson["wind_v-surface"] || [];
-  const gust = windJson["gust-surface"] || [];
-  const waveHeight =
-    waveJson["waves_height-surface"] ||
-    waveJson["waves-surface"] ||
-    waveJson.waves_height ||
-    [];
+  const windTs = windJson.ts || [];
+  const waveTs = waveJson.ts || [];
 
-  const indexes = ts
+  const windIndexes = windTs
     .map((stamp, idx) => ({ idx, date: new Date(stamp) }))
     .filter(({ date }) => toYmd(date) === tripDate && date.getHours() >= startHour && date.getHours() <= endHour)
     .map(({ idx }) => idx);
 
-  if (!indexes.length) {
-    throw new Error("No Windy forecast points returned for that date and time window.");
-  }
+  const waveIndexes = waveTs
+    .map((stamp, idx) => ({ idx, date: new Date(stamp) }))
+    .filter(({ date }) => toYmd(date) === tripDate && date.getHours() >= startHour && date.getHours() <= endHour)
+    .map(({ idx }) => idx);
 
-  const windVectors = indexes.map((idx) => windFromUv(u[idx], v[idx]));
+  if (!windIndexes.length) throw new Error("No Windy wind forecast points returned for that date and time window.");
+  if (!waveIndexes.length) throw new Error("No Windy wave forecast points returned for that date and time window.");
+
+  const u = pickSeries(windJson, ["wind_u-surface", "wind_u"], ["wind_u"]);
+  const v = pickSeries(windJson, ["wind_v-surface", "wind_v"], ["wind_v"]);
+  const gust = pickSeries(windJson, ["gust-surface", "windGust-surface", "gust"], ["gust"]);
+  const waveHeight = pickSeries(
+    waveJson,
+    ["waves_height-surface", "wavesHeight-surface", "waves", "waves_height"],
+    ["wave", "height"]
+  );
+
+  const windVectors = windIndexes.map((idx) => windFromUv(u[idx], v[idx]));
   const windSpeedRange = minMax(windVectors.map((item) => item.speed));
-  const avgWindVector = windFromUv(avg(indexes.map((idx) => u[idx])) || 0, avg(indexes.map((idx) => v[idx])) || 0);
-  const gustRange = minMax(indexes.map((idx) => gust[idx]));
-  const waveRange = minMax(indexes.map((idx) => waveHeight[idx]));
-  const waveAvg = avg(indexes.map((idx) => waveHeight[idx])) || 0;
-  const gustAvg = avg(indexes.map((idx) => gust[idx])) || 0;
+  const avgWindVector = windFromUv(avg(windIndexes.map((idx) => u[idx])) || 0, avg(windIndexes.map((idx) => v[idx])) || 0);
+  const gustRange = minMax(windIndexes.map((idx) => gust[idx]));
+  const waveRange = minMax(waveIndexes.map((idx) => waveHeight[idx]));
+  const waveAvg = avg(waveIndexes.map((idx) => waveHeight[idx])) || 0;
+  const gustAvg = avg(windIndexes.map((idx) => gust[idx])) || 0;
   const windAvg = avg(windVectors.map((item) => item.speed)) || 0;
 
   return {
@@ -202,9 +215,9 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
     gustAvg,
     waveAvg,
     windDir: avgWindVector.direction,
-    wind: windSpeedRange,
-    gusts: gustRange,
-    waves: waveRange,
+    windRange: windSpeedRange,
+    gustRange,
+    waveRange,
   };
 }
 
@@ -291,20 +304,14 @@ export default function App() {
           timeBlock,
           key,
         });
-        if (!cancelled) {
-          setPointData({ status: "ready", message: "", forecast });
-        }
+        if (!cancelled) setPointData({ status: "ready", message: "", forecast });
       } catch (error) {
-        if (!cancelled) {
-          setPointData({ status: "error", message: error.message || "Windy request failed.", forecast: null });
-        }
+        if (!cancelled) setPointData({ status: "error", message: error.message || "Windy request failed.", forecast: null });
       }
     }
 
     run();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [selectedPoint, tripDate, timeBlock]);
 
   const interpreted = useMemo(() => {
@@ -464,19 +471,19 @@ export default function App() {
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Wind</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? `${formatWindRange(pointData.forecast.wind, units)} ${pointData.forecast.windDir}` : "—"}
+                    {pointData.forecast ? `${formatSpeedRange(pointData.forecast.windRange, units)} ${pointData.forecast.windDir}` : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Gusts</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? formatWindRange(pointData.forecast.gusts, units) : "—"}
+                    {pointData.forecast ? formatSpeedRange(pointData.forecast.gustRange, units) : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Waves</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? formatWaveRange(pointData.forecast.waves, units) : "—"}
+                    {pointData.forecast ? formatWaveRange(pointData.forecast.waveRange, units) : "—"}
                   </div>
                 </div>
               </div>
