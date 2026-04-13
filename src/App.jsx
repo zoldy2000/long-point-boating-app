@@ -106,32 +106,20 @@ function labelFromScore(score) {
   return "Poor";
 }
 
-function classifySpot(lat, lon) {
-  if (lat > 42.615) return "More exposed water";
-  if (lon < -80.42) return "West side";
-  if (lon > -80.22) return "East side";
-  return "Central bay";
-}
-
-function reasonFromForecast({ spotName, windDir, waveAvg, gustAvg, boatLengthFt, score, units }) {
-  const waveText = units === "metric"
-    ? `${(waveAvg || 0).toFixed(1)} m`
-    : `${mToFt(waveAvg || 0).toFixed(1)} ft`;
-
-  const gustText = units === "metric"
-    ? `${Math.round(gustAvg || 0)} m/s`
-    : `${Math.round(mpsToMph(gustAvg || 0))} mph`;
-
-  if (score >= 8) {
-    return `${spotName} looks manageable for about a ${boatLengthFt} ft family boat. Wind is ${windDir} here and forecast waves remain relatively modest at this clicked point.`;
+function genericInterpretation({ score, boatLengthFt }) {
+  if (score >= 9) {
+    return `Conditions look very comfortable for a boat around ${boatLengthFt} ft. Most boaters in this size range should find this a very good ride.`;
   }
-  if (score >= 6) {
-    return `${spotName} should still be usable, but expect some chop. ${windDir} wind with gusts near ${gustText} may make the ride less comfortable.`;
+  if (score >= 7) {
+    return `Conditions look generally good for a boat around ${boatLengthFt} ft. Expect a decent ride, with some movement still possible depending on your comfort level.`;
   }
-  if (score >= 4) {
-    return `${spotName} is getting into caution territory. Forecast waves around ${waveText} may feel uncomfortable for many family boats around ${boatLengthFt} ft.`;
+  if (score >= 5) {
+    return `Conditions look mixed for a boat around ${boatLengthFt} ft. Some boaters may still go, but comfort will depend on how much chop you are willing to tolerate.`;
   }
-  return `${spotName} looks poor for a family boat around ${boatLengthFt} ft. This clicked spot is likely too rough or uncomfortable in this setup.`;
+  if (score >= 3) {
+    return `Use caution with a boat around ${boatLengthFt} ft. Many boaters would consider this an uncomfortable ride.`;
+  }
+  return `Conditions look poor for a boat around ${boatLengthFt} ft. For many boaters this would likely be an uncomfortable or not worthwhile outing.`;
 }
 
 function pickSeries(obj, exactKeys = [], containsTerms = []) {
@@ -333,29 +321,20 @@ export default function App() {
       waveAvg: pointData.forecast.waveAvg,
       boatLengthFt,
     });
-    const spotName = classifySpot(selectedPoint.lat, selectedPoint.lon);
+
     return {
       score,
       label: labelFromScore(score),
-      reason: reasonFromForecast({
-        spotName,
-        windDir: pointData.forecast.windDir,
-        waveAvg: pointData.forecast.waveAvg,
-        gustAvg: pointData.forecast.gustAvg,
-        boatLengthFt,
-        score,
-        units,
-      }),
-      spotName,
+      reason: genericInterpretation({ score, boatLengthFt }),
     };
-  }, [pointData.forecast, boatLengthFt, selectedPoint, units]);
+  }, [pointData.forecast, boatLengthFt]);
 
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc", padding: 16, fontFamily: "Arial, sans-serif", color: "#0f172a" }}>
       <div style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16, paddingBottom: 24 }}>
         <div style={{ borderRadius: 20, background: "#0f172a", color: "white", padding: 20 }}>
-          <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#cbd5e1" }}>Click-a-spot interpreter</div>
-          <h1 style={{ margin: "8px 0 0 0" }}>Long Point Bay Boating Meaning</h1>
+          <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#cbd5e1" }}>Boater's App</div>
+          <h1 style={{ margin: "8px 0 0 0" }}>Boating Meaning</h1>
           <p style={{ margin: "10px 0 0 0", color: "#cbd5e1" }}>
             Click any spot on the map. The app reads Windy data for that exact point and translates it into simple boating meaning for your boat size.
           </p>
@@ -395,7 +374,7 @@ export default function App() {
 
         <div style={{ display: "grid", gap: 16, gridTemplateColumns: "1.35fr 0.95fr" }}>
           <div style={{ background: "white", borderRadius: 18, padding: 16, boxShadow: "0 2px 10px rgba(0,0,0,0.08)" }}>
-            <div style={{ marginBottom: 10, color: "#64748b", fontSize: 14 }}>Click any water spot in Long Point Bay. You can also zoom and drag.</div>
+            <div style={{ marginBottom: 10, color: "#64748b", fontSize: 14 }}>Click any water spot. You can also zoom and drag.</div>
             <div
               ref={mapDivRef}
               style={{
@@ -412,7 +391,7 @@ export default function App() {
           <div style={{ background: "white", borderRadius: 18, padding: 16, boxShadow: "0 2px 10px rgba(0,0,0,0.08)" }}>
             <div style={{ background: "#f8fafc", borderRadius: 16, padding: 14 }}>
               <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>Selected spot</div>
-              <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4 }}>{interpreted?.spotName || "Waiting for forecast"}</div>
+              <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4 }}>Point forecast</div>
               <div style={{ color: "#64748b", marginTop: 4 }}>
                 {selectedPoint.lat.toFixed(4)}, {selectedPoint.lon.toFixed(4)}
               </div>
