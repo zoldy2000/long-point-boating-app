@@ -9,16 +9,11 @@ const LENGTH_RANGES = [
 ];
 
 const MAP_START = { lat: 42.603, lon: -80.345 };
+const MAP_CENTER = [42.585, -80.31];
 
 function todayString() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function targetTimestamp(dateStr, block) {
-  const hour = block === "morning" ? 10 : block === "afternoon" ? 14 : 18;
-  const d = new Date(`${dateStr}T${String(hour).padStart(2, "0")}:00:00`);
-  return d.getTime();
 }
 
 function toYmd(date) {
@@ -57,10 +52,10 @@ function degToCompass(deg) {
   return dirs[idx];
 }
 
-function formatSpeed(value, units) {
-  if (!Number.isFinite(value)) return "—";
-  if (units === "metric") return `${value.toFixed(1)} m/s`;
-  return `${Math.round(mpsToMph(value))} mph`;
+function windFromUv(u, v) {
+  const speed = Math.sqrt(u * u + v * v);
+  const fromDeg = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
+  return { speed, direction: degToCompass(fromDeg) };
 }
 
 function formatSpeedRange(range, units) {
@@ -139,32 +134,28 @@ function pickSeries(obj, exactKeys = [], containsTerms = []) {
   return [];
 }
 
-async function fetchPointForecast({ lat, lon, tripDate, timeBlock, pointKey }) {
-  if (!pointKey) {
-    return { gustRange: null, waveRange: null, gustAvg: null, waveAvg: null };
-  }
-
+async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
   const [startHour, endHour] = windowHours(timeBlock);
 
   const makeReq = (model, parameters) =>
     fetch("https://api.windy.com/api/point-forecast/v2", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-windy-api-key": pointKey },
+      headers: { "Content-Type": "application/json", "x-windy-api-key": key },
       body: JSON.stringify({
         lat,
         lon,
         model,
         parameters,
         levels: ["surface"],
-        key: pointKey,
+        key,
       }),
     }).then(async (res) => {
-      if (!res.ok) throw new Error(`Windy point forecast failed: ${res.status}`);
+      if (!res.ok) throw new Error(`Windy request failed: ${res.status}`);
       return res.json();
     });
 
   const [windJson, waveJson] = await Promise.all([
-    makeReq("gfs", ["windGust"]),
+    makeReq("gfs", ["wind", "windGust"]),
     makeReq("gfsWave", ["waves"]),
   ]);
 
@@ -181,6 +172,11 @@ async function fetchPointForecast({ lat, lon, tripDate, timeBlock, pointKey }) {
     .filter(({ date }) => toYmd(date) === tripDate && date.getHours() >= startHour && date.getHours() <= endHour)
     .map(({ idx }) => idx);
 
+  if (!windIndexes.length) throw new Error("No Windy wind forecast points returned for that date and time window.");
+  if (!waveIndexes.length) throw new Error("No Windy wave forecast points returned for that date and time window.");
+
+  const u = pickSeries(windJson, ["wind_u-surface", "wind_u"], ["wind_u"]);
+  const v = pickSeries(windJson, ["wind_v-surface", "wind_v"], ["wind_v"]);
   const gust = pickSeries(windJson, ["gust-surface", "windGust-surface", "gust"], ["gust"]);
   const waveHeight = pickSeries(
     waveJson,
@@ -188,138 +184,88 @@ async function fetchPointForecast({ lat, lon, tripDate, timeBlock, pointKey }) {
     ["wave", "height"]
   );
 
+  const windVectors = windIndexes.map((idx) => windFromUv(u[idx], v[idx]));
+  const windSpeedRange = minMax(windVectors.map((item) => item.speed));
+  const avgWindVector = windFromUv(avg(windIndexes.map((idx) => u[idx])) || 0, avg(windIndexes.map((idx) => v[idx])) || 0);
   const gustRange = minMax(windIndexes.map((idx) => gust[idx]));
   const waveRange = minMax(waveIndexes.map((idx) => waveHeight[idx]));
-  const gustAvg = avg(windIndexes.map((idx) => gust[idx])) || null;
-  const waveAvg = avg(waveIndexes.map((idx) => waveHeight[idx])) || null;
+  const waveAvg = avg(waveIndexes.map((idx) => waveHeight[idx])) || 0;
+  const gustAvg = avg(windIndexes.map((idx) => gust[idx])) || 0;
+  const windAvg = avg(windVectors.map((item) => item.speed)) || 0;
 
-  return { gustRange, waveRange, gustAvg, waveAvg };
+  return {
+    windAvg,
+    gustAvg,
+    waveAvg,
+    windDir: avgWindVector.direction,
+    windRange: windSpeedRange,
+    gustRange,
+    waveRange,
+  };
 }
 
-function useWindyMap({ mapKey, selectedPoint, tripDate, timeBlock, units, onPick, onWind }) {
+function useLeafletMap({ selectedPoint, onPick }) {
   const mapDivRef = useRef(null);
-  const apiRef = useRef(null);
+  const mapRef = useRef(null);
+  const markerRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
-      if (!mapKey || !mapDivRef.current || apiRef.current) return;
+    async function loadLeaflet() {
+      if (!document.querySelector('link[data-leaflet="true"]')) {
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+        link.dataset.leaflet = "true";
+        document.head.appendChild(link);
+      }
 
       if (!window.L) {
         await new Promise((resolve, reject) => {
           const script = document.createElement("script");
-          script.src = "https://unpkg.com/leaflet@1.4.0/dist/leaflet.js";
+          script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
           script.onload = resolve;
           script.onerror = reject;
           document.body.appendChild(script);
         });
       }
 
-      if (!window.windyInit) {
-        await new Promise((resolve, reject) => {
-          const script = document.createElement("script");
-          script.src = "https://api.windy.com/assets/map-forecast/libBoot.js";
-          script.onload = resolve;
-          script.onerror = reject;
-          document.body.appendChild(script);
-        });
-      }
+      if (cancelled || !mapDivRef.current || mapRef.current) return;
 
-      if (cancelled) return;
+      const L = window.L;
+      const map = L.map(mapDivRef.current, {
+        center: [MAP_CENTER[0], MAP_CENTER[1]],
+        zoom: 10,
+        minZoom: 9,
+        maxZoom: 14,
+      });
 
-      window.windyInit(
-        {
-          key: mapKey,
-          lat: selectedPoint.lat,
-          lon: selectedPoint.lon,
-          zoom: 10,
-          timestamp: targetTimestamp(tripDate, timeBlock),
-          overlay: "wind",
-          latlon: true,
-          numDirection: false,
-          verbose: false,
-        },
-        (windyAPI) => {
-          if (cancelled) return;
-          const { map, picker, utils, store, broadcast } = windyAPI;
-          apiRef.current = { map, picker, utils, store, broadcast };
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(map);
 
-          const emitWind = () => {
-            try {
-              const params = picker.getParams();
-              if (!params || !params.values || !Array.isArray(params.values)) return;
-              const obj = utils.wind2obj(params.values);
-              onWind({
-                lat: params.lat,
-                lon: params.lon,
-                windAvg: obj.wind,
-                windDir: degToCompass(obj.dir),
-              });
-            } catch {}
-          };
+      const marker = L.marker([selectedPoint.lat, selectedPoint.lon]).addTo(map);
 
-          picker.on("pickerMoved", ({ lat, lon, values }) => {
-            const obj = utils.wind2obj(values);
-            onPick({ lat, lon });
-            onWind({
-              lat,
-              lon,
-              windAvg: obj.wind,
-              windDir: degToCompass(obj.dir),
-            });
-          });
+      map.on("click", (e) => {
+        onPick({ lat: e.latlng.lat, lon: e.latlng.lng });
+      });
 
-          picker.on("pickerOpened", ({ lat, lon, values }) => {
-            const obj = utils.wind2obj(values);
-            onPick({ lat, lon });
-            onWind({
-              lat,
-              lon,
-              windAvg: obj.wind,
-              windDir: degToCompass(obj.dir),
-            });
-          });
-
-          map.on("click", (e) => {
-            picker.open({ lat: e.latlng.lat, lon: e.latlng.lng });
-          });
-
-          broadcast.once("redrawFinished", () => {
-            picker.open({ lat: selectedPoint.lat, lon: selectedPoint.lon });
-            emitWind();
-          });
-        }
-      );
+      mapRef.current = map;
+      markerRef.current = marker;
     }
 
-    load();
+    loadLeaflet();
     return () => {
       cancelled = true;
     };
-  }, [mapKey, onPick, onWind]);
+  }, [onPick]);
 
   useEffect(() => {
-    const api = apiRef.current;
-    if (!api) return;
-    try {
-      api.store.set("timestamp", targetTimestamp(tripDate, timeBlock));
-      api.store.set("overlay", "wind");
-      api.picker.open({ lat: selectedPoint.lat, lon: selectedPoint.lon });
-    } catch {}
-  }, [tripDate, timeBlock, selectedPoint.lat, selectedPoint.lon]);
-
-  useEffect(() => {
-    const api = apiRef.current;
-    if (!api) return;
-    try {
-      const windMetric = units === "metric" ? "m/s" : "mph";
-      const allowed = api.overlays?.wind?.listMetrics?.() || [];
-      if (allowed.includes(windMetric)) {
-        api.overlays.wind.setMetric(windMetric);
-      }
-    } catch {}
-  }, [units]);
+    if (markerRef.current) {
+      markerRef.current.setLatLng([selectedPoint.lat, selectedPoint.lon]);
+    }
+  }, [selectedPoint.lat, selectedPoint.lon]);
 
   return mapDivRef;
 }
@@ -330,74 +276,58 @@ export default function App() {
   const [lengthRange, setLengthRange] = useState("19-21");
   const [units, setUnits] = useState("imperial");
   const [selectedPoint, setSelectedPoint] = useState(MAP_START);
-  const [mapWind, setMapWind] = useState({ windAvg: null, windDir: "—" });
-  const [pointData, setPointData] = useState({ status: "idle", message: "", gustRange: null, waveRange: null, gustAvg: null, waveAvg: null });
+  const [pointData, setPointData] = useState({ status: "idle", message: "", forecast: null });
 
-  const mapKey = import.meta.env.VITE_WINDY_MAP_API_KEY;
-  const pointKey = import.meta.env.VITE_WINDY_API_KEY;
-
-  const mapDivRef = useWindyMap({
-    mapKey,
+  const mapDivRef = useLeafletMap({
     selectedPoint,
-    tripDate,
-    timeBlock,
-    units,
     onPick: setSelectedPoint,
-    onWind: (data) => {
-      setSelectedPoint({ lat: data.lat, lon: data.lon });
-      setMapWind({ windAvg: data.windAvg, windDir: data.windDir });
-    },
   });
 
   const boatLengthFt = LENGTH_RANGES.find((item) => item.value === lengthRange)?.boatLengthFt || 20;
 
   useEffect(() => {
     let cancelled = false;
+    const key = import.meta.env.VITE_WINDY_API_KEY;
+    if (!key) {
+      setPointData({ status: "missing-key", message: "Windy key not found in app environment.", forecast: null });
+      return;
+    }
+
     async function run() {
       setPointData((prev) => ({ ...prev, status: "loading", message: "" }));
       try {
-        const result = await fetchPointForecast({
+        const forecast = await fetchWindyPoint({
           lat: selectedPoint.lat,
           lon: selectedPoint.lon,
           tripDate,
           timeBlock,
-          pointKey,
+          key,
         });
-        if (!cancelled) {
-          setPointData({ status: "ready", message: "", ...result });
-        }
+        if (!cancelled) setPointData({ status: "ready", message: "", forecast });
       } catch (error) {
-        if (!cancelled) {
-          setPointData({
-            status: "error",
-            message: error.message || "Windy point forecast failed.",
-            gustRange: null,
-            waveRange: null,
-            gustAvg: null,
-            waveAvg: null,
-          });
-        }
+        if (!cancelled) setPointData({ status: "error", message: error.message || "Windy request failed.", forecast: null });
       }
     }
+
     run();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedPoint, tripDate, timeBlock, pointKey]);
+    return () => { cancelled = true; };
+  }, [selectedPoint, tripDate, timeBlock]);
 
   const interpreted = useMemo(() => {
+    if (!pointData.forecast) return { score: "—", label: "—", reason: "Click a spot and wait for the forecast." };
     const score = scoreFromForecast({
-      windAvg: mapWind.windAvg,
-      gustAvg: pointData.gustAvg,
-      waveAvg: pointData.waveAvg,
+      windAvg: pointData.forecast.windAvg,
+      gustAvg: pointData.forecast.gustAvg,
+      waveAvg: pointData.forecast.waveAvg,
       boatLengthFt,
     });
+
     return {
       score,
       label: labelFromScore(score),
       reason: genericInterpretation({ score, boatLengthFt }),
     };
-  }, [mapWind.windAvg, pointData.gustAvg, pointData.waveAvg, boatLengthFt]);
+  }, [pointData.forecast, boatLengthFt]);
 
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc", padding: 16, fontFamily: "Arial, sans-serif", color: "#0f172a" }}>
@@ -406,7 +336,7 @@ export default function App() {
           <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#cbd5e1" }}>Boater's App</div>
           <h1 style={{ margin: "8px 0 0 0" }}>Boating Meaning</h1>
           <p style={{ margin: "10px 0 0 0", color: "#cbd5e1" }}>
-            Click any spot on the map. Wind comes from Windy’s map picker for that exact point. Gusts and waves come from Windy point forecast for the same coordinates and time window.
+            Click any spot on the map. The app reads forecast data for that exact point and translates it into simple boating meaning for your boat size.
           </p>
         </div>
 
@@ -467,14 +397,9 @@ export default function App() {
               </div>
             </div>
 
-            {pointData.status === "loading" && <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 16, padding: 14 }}>Loading gusts and waves...</div>}
-            {pointData.status === "error" && (
+            {pointData.status === "loading" && <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 16, padding: 14 }}>Loading forecast...</div>}
+            {(pointData.status === "error" || pointData.status === "missing-key") && (
               <div style={{ marginTop: 14, background: "#fee2e2", color: "#991b1b", borderRadius: 16, padding: 14 }}>{pointData.message}</div>
-            )}
-            {!mapKey && (
-              <div style={{ marginTop: 14, background: "#fee2e2", color: "#991b1b", borderRadius: 16, padding: 14 }}>
-                Missing VITE_WINDY_MAP_API_KEY
-              </div>
             )}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14 }}>
@@ -489,24 +414,24 @@ export default function App() {
             </div>
 
             <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 16, padding: 14 }}>
-              <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>Windy data at this exact spot</div>
+              <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>Forecast at this exact spot</div>
               <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr 1fr", marginTop: 10 }}>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Wind</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {Number.isFinite(mapWind.windAvg) ? `${formatSpeed(mapWind.windAvg, units)} ${mapWind.windDir}` : "—"}
+                    {pointData.forecast ? `${formatSpeedRange(pointData.forecast.windRange, units)} ${pointData.forecast.windDir}` : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Gusts</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {formatSpeedRange(pointData.gustRange, units)}
+                    {pointData.forecast ? formatSpeedRange(pointData.forecast.gustRange, units) : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Waves</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {formatWaveRange(pointData.waveRange, units)}
+                    {pointData.forecast ? formatWaveRange(pointData.forecast.waveRange, units) : "—"}
                   </div>
                 </div>
               </div>
