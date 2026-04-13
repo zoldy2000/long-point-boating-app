@@ -80,22 +80,17 @@ function genericInterpretation({ score, boatLengthFt }) {
   return `Conditions look poor for a boat around ${boatLengthFt} ft. For many boaters this would likely be an uncomfortable or not worthwhile outing.`;
 }
 
-function formatWind(value, units) {
+function formatSpeed(value, units) {
   if (!Number.isFinite(value)) return "—";
   return units === "metric" ? `${value.toFixed(1)} m/s` : `${Math.round(mpsToMph(value))} mph`;
 }
 
-function formatGust(value, units) {
-  if (!Number.isFinite(value)) return "—";
-  return units === "metric" ? `${value.toFixed(1)} m/s` : `${Math.round(mpsToMph(value))} mph`;
-}
-
-function formatWaves(value, units) {
+function formatWave(value, units) {
   if (!Number.isFinite(value)) return "—";
   return units === "metric" ? `${value.toFixed(1)} m` : `${mToFt(value).toFixed(1)} ft`;
 }
 
-function useWindyMap({ mapKey, selectedPoint, timeBlock, tripDate, onPick, onData, units }) {
+function useWindyMap({ mapKey, selectedPoint, timeBlock, tripDate, onPick, onData }) {
   const mapDivRef = useRef(null);
   const apiRef = useRef(null);
   const pendingRef = useRef(0);
@@ -103,6 +98,7 @@ function useWindyMap({ mapKey, selectedPoint, timeBlock, tripDate, onPick, onDat
   const collectAtPoint = useCallback(async (lat, lon) => {
     const api = apiRef.current;
     if (!api) return;
+
     const runId = Date.now();
     pendingRef.current = runId;
 
@@ -111,14 +107,14 @@ function useWindyMap({ mapKey, selectedPoint, timeBlock, tripDate, onPick, onDat
     const openAndWait = (overlayName) =>
       new Promise((resolve, reject) => {
         let timeoutId;
-        const done = () => {
-          clearTimeout(timeoutId);
-          picker.off("pickerMoved", movedHandler);
-          resolve();
-        };
         const movedHandler = ({ lat: pLat, lon: pLon }) => {
-          if (Math.abs(pLat - lat) < 0.02 && Math.abs(pLon - lon) < 0.02) done();
+          if (Math.abs(pLat - lat) < 0.02 && Math.abs(pLon - lon) < 0.02) {
+            clearTimeout(timeoutId);
+            picker.off("pickerMoved", movedHandler);
+            resolve();
+          }
         };
+
         timeoutId = window.setTimeout(() => {
           picker.off("pickerMoved", movedHandler);
           reject(new Error(`Timeout waiting for ${overlayName} picker values`));
@@ -159,10 +155,10 @@ function useWindyMap({ mapKey, selectedPoint, timeBlock, tripDate, onPick, onDat
       onData({
         status: "ready",
         message: "",
-        windAvg: windObj.wind,
-        windDir: degToCompass(windObj.dir),
+        windAvg: windObj?.wind ?? null,
+        windDir: Number.isFinite(windObj?.dir) ? degToCompass(windObj.dir) : "—",
         gustAvg: Number.isFinite(gustValue) ? gustValue : null,
-        waveAvg: Number.isFinite(waveObj.size) ? waveObj.size : null,
+        waveAvg: Number.isFinite(waveObj?.size) ? waveObj.size : null,
       });
     } catch (error) {
       onData({
@@ -219,8 +215,7 @@ function useWindyMap({ mapKey, selectedPoint, timeBlock, tripDate, onPick, onDat
           const { map } = windyAPI;
 
           map.on("click", (e) => {
-            const next = { lat: e.latlng.lat, lon: e.latlng.lng };
-            onPick(next);
+            onPick({ lat: e.latlng.lat, lon: e.latlng.lng });
           });
 
           windyAPI.broadcast.once("redrawFinished", () => {
@@ -242,26 +237,10 @@ function useWindyMap({ mapKey, selectedPoint, timeBlock, tripDate, onPick, onDat
     try {
       api.store.set("timestamp", targetTimestamp(tripDate, timeBlock));
       collectAtPoint(selectedPoint.lat, selectedPoint.lon);
-    } catch {}
+    } catch {
+      // ignore runtime refresh issues
+    }
   }, [tripDate, timeBlock, selectedPoint.lat, selectedPoint.lon, collectAtPoint]);
-
-  useEffect(() => {
-    const api = apiRef.current;
-    if (!api) return;
-    try {
-      const windMetric = units === "metric" ? "m/s" : "mph";
-      const waveMetric = units === "metric" ? "m" : "ft";
-      const gustMetric = units === "metric" ? "m/s" : "mph";
-
-      const windAllowed = api.overlays?.wind?.listMetrics?.() || [];
-      const waveAllowed = api.overlays?.waves?.listMetrics?.() || [];
-      const gustAllowed = api.overlays?.gust?.listMetrics?.() || [];
-
-      if (windAllowed.includes(windMetric)) api.overlays.wind.setMetric(windMetric);
-      if (waveAllowed.includes(waveMetric)) api.overlays.waves.setMetric(waveMetric);
-      if (gustAllowed.includes(gustMetric)) api.overlays.gust.setMetric(gustMetric);
-    } catch {}
-  }, [units]);
 
   return mapDivRef;
 }
@@ -289,7 +268,6 @@ export default function App() {
     tripDate,
     onPick: setSelectedPoint,
     onData: setWeatherData,
-    units,
   });
 
   const boatLengthFt = LENGTH_RANGES.find((item) => item.value === lengthRange)?.boatLengthFt || 20;
@@ -408,19 +386,19 @@ export default function App() {
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Wind</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {Number.isFinite(weatherData.windAvg) ? `${formatSpeedRange({ min: weatherData.windAvg, max: weatherData.windAvg }, units)} ${weatherData.windDir}` : "—"}
+                    {Number.isFinite(weatherData.windAvg) ? `${formatSpeed(weatherData.windAvg, units)} ${weatherData.windDir}` : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Gusts</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {Number.isFinite(weatherData.gustAvg) ? formatGust(weatherData.gustAvg, units) : "—"}
+                    {Number.isFinite(weatherData.gustAvg) ? formatSpeed(weatherData.gustAvg, units) : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Waves</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {Number.isFinite(weatherData.waveAvg) ? formatWaves(weatherData.waveAvg, units) : "—"}
+                    {Number.isFinite(weatherData.waveAvg) ? formatWave(weatherData.waveAvg, units) : "—"}
                   </div>
                 </div>
               </div>
