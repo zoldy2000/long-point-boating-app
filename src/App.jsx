@@ -1,13 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const ZOOM = 10;
-const MAP_CONFIG = {
-  cols: 5,
-  rows: 3,
-  tileSize: 256,
-  center: { lat: 42.585, lon: -80.28 },
-};
-
 const LENGTH_RANGES = [
   { value: "15-18", label: "15–18 ft", boatLengthFt: 17 },
   { value: "19-21", label: "19–21 ft", boatLengthFt: 20 },
@@ -15,6 +7,9 @@ const LENGTH_RANGES = [
   { value: "25-27", label: "25–27 ft", boatLengthFt: 26 },
   { value: "28-30", label: "28–30 ft", boatLengthFt: 29 },
 ];
+
+const MAP_START = { lat: 42.603, lon: -80.345 };
+const MAP_CENTER = [42.585, -80.31];
 
 function todayString() {
   const d = new Date();
@@ -139,8 +134,8 @@ function reasonFromForecast({ spotName, windDir, waveAvg, gustAvg, boatLengthFt,
   return `${spotName} looks poor for a family boat around ${boatLengthFt} ft. This clicked spot is likely too rough or uncomfortable in this setup.`;
 }
 
-function pickSeries(obj, candidateKeys = [], containsTerms = []) {
-  for (const key of candidateKeys) {
+function pickSeries(obj, exactKeys = [], containsTerms = []) {
+  for (const key of exactKeys) {
     if (Array.isArray(obj[key])) return obj[key];
   }
   for (const [key, value] of Object.entries(obj)) {
@@ -221,58 +216,70 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
   };
 }
 
-function latLonToTile(lat, lon, zoom) {
-  const n = 2 ** zoom;
-  const x = ((lon + 180) / 360) * n;
-  const latRad = (lat * Math.PI) / 180;
-  const y = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n;
-  return { x, y };
-}
+function useLeafletMap({ selectedPoint, onPick }) {
+  const mapDivRef = useRef(null);
+  const mapRef = useRef(null);
+  const markerRef = useRef(null);
 
-function tileToLatLon(x, y, zoom) {
-  const n = 2 ** zoom;
-  const lon = (x / n) * 360 - 180;
-  const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n)));
-  const lat = (latRad * 180) / Math.PI;
-  return { lat, lon };
-}
+  useEffect(() => {
+    let cancelled = false;
 
-function buildTileGrid() {
-  const center = latLonToTile(MAP_CONFIG.center.lat, MAP_CONFIG.center.lon, ZOOM);
-  const startX = Math.floor(center.x - MAP_CONFIG.cols / 2);
-  const startY = Math.floor(center.y - MAP_CONFIG.rows / 2);
-  const tiles = [];
-  for (let row = 0; row < MAP_CONFIG.rows; row += 1) {
-    for (let col = 0; col < MAP_CONFIG.cols; col += 1) {
-      const x = startX + col;
-      const y = startY + row;
-      tiles.push({
-        x,
-        y,
-        col,
-        row,
-        url: `https://tile.openstreetmap.org/${ZOOM}/${x}/${y}.png`,
+    async function loadLeaflet() {
+      if (!document.querySelector('link[data-leaflet="true"]')) {
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+        link.dataset.leaflet = "true";
+        document.head.appendChild(link);
+      }
+
+      if (!window.L) {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+          script.onload = resolve;
+          script.onerror = reject;
+          document.body.appendChild(script);
+        });
+      }
+
+      if (cancelled || !mapDivRef.current || mapRef.current) return;
+
+      const L = window.L;
+      const map = L.map(mapDivRef.current, {
+        center: [MAP_CENTER[0], MAP_CENTER[1]],
+        zoom: 10,
+        minZoom: 9,
+        maxZoom: 14,
       });
+
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(map);
+
+      const marker = L.marker([selectedPoint.lat, selectedPoint.lon]).addTo(map);
+
+      map.on("click", (e) => {
+        onPick({ lat: e.latlng.lat, lon: e.latlng.lng });
+      });
+
+      mapRef.current = map;
+      markerRef.current = marker;
     }
-  }
-  return { tiles, startX, startY };
-}
 
-const TILE_GRID = buildTileGrid();
+    loadLeaflet();
+    return () => {
+      cancelled = true;
+    };
+  }, [onPick]);
 
-function markerStyleFromLatLon(lat, lon) {
-  const tile = latLonToTile(lat, lon, ZOOM);
-  const leftPct = ((tile.x - TILE_GRID.startX) / MAP_CONFIG.cols) * 100;
-  const topPct = ((tile.y - TILE_GRID.startY) / MAP_CONFIG.rows) * 100;
-  return { left: `${leftPct}%`, top: `${topPct}%` };
-}
+  useEffect(() => {
+    if (markerRef.current) {
+      markerRef.current.setLatLng([selectedPoint.lat, selectedPoint.lon]);
+    }
+  }, [selectedPoint.lat, selectedPoint.lon]);
 
-function clickToLatLon(clientX, clientY, rect) {
-  const xPct = (clientX - rect.left) / rect.width;
-  const yPct = (clientY - rect.top) / rect.height;
-  const tileX = TILE_GRID.startX + xPct * MAP_CONFIG.cols;
-  const tileY = TILE_GRID.startY + yPct * MAP_CONFIG.rows;
-  return tileToLatLon(tileX, tileY, ZOOM);
+  return mapDivRef;
 }
 
 export default function App() {
@@ -280,9 +287,13 @@ export default function App() {
   const [timeBlock, setTimeBlock] = useState("afternoon");
   const [lengthRange, setLengthRange] = useState("19-21");
   const [units, setUnits] = useState("imperial");
-  const [selectedPoint, setSelectedPoint] = useState({ lat: 42.603, lon: -80.345 });
+  const [selectedPoint, setSelectedPoint] = useState(MAP_START);
   const [pointData, setPointData] = useState({ status: "idle", message: "", forecast: null });
-  const mapRef = useRef(null);
+
+  const mapDivRef = useLeafletMap({
+    selectedPoint,
+    onPick: setSelectedPoint,
+  });
 
   const boatLengthFt = LENGTH_RANGES.find((item) => item.value === lengthRange)?.boatLengthFt || 20;
 
@@ -339,15 +350,6 @@ export default function App() {
     };
   }, [pointData.forecast, boatLengthFt, selectedPoint, units]);
 
-  function handleMapClick(e) {
-    const rect = mapRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const next = clickToLatLon(e.clientX, e.clientY, rect);
-    setSelectedPoint({ lat: next.lat, lon: next.lon });
-  }
-
-  const markerStyle = markerStyleFromLatLon(selectedPoint.lat, selectedPoint.lon);
-
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc", padding: 16, fontFamily: "Arial, sans-serif", color: "#0f172a" }}>
       <div style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16, paddingBottom: 24 }}>
@@ -393,51 +395,18 @@ export default function App() {
 
         <div style={{ display: "grid", gap: 16, gridTemplateColumns: "1.35fr 0.95fr" }}>
           <div style={{ background: "white", borderRadius: 18, padding: 16, boxShadow: "0 2px 10px rgba(0,0,0,0.08)" }}>
-            <div style={{ marginBottom: 10, color: "#64748b", fontSize: 14 }}>Click any water spot in Long Point Bay.</div>
+            <div style={{ marginBottom: 10, color: "#64748b", fontSize: 14 }}>Click any water spot in Long Point Bay. You can also zoom and drag.</div>
             <div
-              ref={mapRef}
-              onClick={handleMapClick}
+              ref={mapDivRef}
               style={{
-                position: "relative",
                 width: "100%",
-                aspectRatio: `${MAP_CONFIG.cols} / ${MAP_CONFIG.rows}`,
-                overflow: "hidden",
+                height: 620,
                 borderRadius: 16,
                 border: "1px solid #cbd5e1",
-                cursor: "crosshair",
+                overflow: "hidden",
                 background: "#dbeafe",
               }}
-            >
-              {TILE_GRID.tiles.map((tile) => (
-                <img
-                  key={`${tile.x}-${tile.y}`}
-                  src={tile.url}
-                  alt=""
-                  style={{
-                    position: "absolute",
-                    left: `${(tile.col / MAP_CONFIG.cols) * 100}%`,
-                    top: `${(tile.row / MAP_CONFIG.rows) * 100}%`,
-                    width: `${100 / MAP_CONFIG.cols}%`,
-                    height: `${100 / MAP_CONFIG.rows}%`,
-                    display: "block",
-                    objectFit: "cover",
-                  }}
-                />
-              ))}
-
-              <div
-                style={{
-                  position: "absolute",
-                  transform: "translate(-50%, -100%)",
-                  left: markerStyle.left,
-                  top: markerStyle.top,
-                  pointerEvents: "none",
-                }}
-              >
-                <div style={{ width: 18, height: 18, borderRadius: 999, background: "#ef4444", border: "3px solid white", boxShadow: "0 2px 10px rgba(0,0,0,0.25)" }} />
-                <div style={{ width: 2, height: 18, background: "#ef4444", margin: "0 auto" }} />
-              </div>
-            </div>
+            />
           </div>
 
           <div style={{ background: "white", borderRadius: 18, padding: 16, boxShadow: "0 2px 10px rgba(0,0,0,0.08)" }}>
