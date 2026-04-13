@@ -16,26 +16,27 @@ function todayString() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function toYmd(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+function blockTargetHour(block) {
+  if (block === "morning") return 10;
+  if (block === "afternoon") return 14;
+  return 18;
 }
 
-function windowHours(block) {
-  if (block === "morning") return [8, 11];
-  if (block === "afternoon") return [12, 16];
-  return [17, 20];
+function targetDate(dateStr, block) {
+  return new Date(`${dateStr}T${String(blockTargetHour(block)).padStart(2, "0")}:00:00`);
 }
 
-function avg(values) {
-  const clean = values.filter((v) => Number.isFinite(v));
-  if (!clean.length) return null;
-  return clean.reduce((sum, v) => sum + v, 0) / clean.length;
-}
-
-function minMax(values) {
-  const clean = values.filter((v) => Number.isFinite(v));
-  if (!clean.length) return null;
-  return { min: Math.min(...clean), max: Math.max(...clean) };
+function nearestIndex(ts, targetMs) {
+  let best = -1;
+  let bestDiff = Infinity;
+  ts.forEach((stamp, idx) => {
+    const diff = Math.abs(new Date(stamp).getTime() - targetMs);
+    if (diff < bestDiff) {
+      best = idx;
+      bestDiff = diff;
+    }
+  });
+  return best;
 }
 
 function mToFt(m) {
@@ -58,22 +59,14 @@ function windFromUv(u, v) {
   return { speed, direction: degToCompass(fromDeg) };
 }
 
-function formatSpeedRange(range, units) {
-  if (!range) return "—";
-  if (units === "metric") return `${range.min.toFixed(1)}-${range.max.toFixed(1)} m/s`;
-  return `${Math.round(mpsToMph(range.min))}-${Math.round(mpsToMph(range.max))} mph`;
+function formatSpeed(value, units) {
+  if (!Number.isFinite(value)) return "—";
+  return units === "metric" ? `${value.toFixed(1)} m/s` : `${Math.round(mpsToMph(value))} mph`;
 }
 
-function formatWaveRange(range, units) {
-  if (!range) return "—";
-  if (units === "metric") {
-    if (Math.abs(range.min - range.max) < 0.08) return `${range.min.toFixed(1)} m`;
-    return `${range.min.toFixed(1)}-${range.max.toFixed(1)} m`;
-  }
-  const min = mToFt(range.min);
-  const max = mToFt(range.max);
-  if (Math.abs(min - max) < 0.15) return `${min.toFixed(1)} ft`;
-  return `${min.toFixed(1)}-${max.toFixed(1)} ft`;
+function formatWave(value, units) {
+  if (!Number.isFinite(value)) return "—";
+  return units === "metric" ? `${value.toFixed(1)} m` : `${mToFt(value).toFixed(1)} ft`;
 }
 
 function boatFactor(boatLengthFt) {
@@ -107,18 +100,10 @@ function labelFromScore(score) {
 }
 
 function genericInterpretation({ score, boatLengthFt }) {
-  if (score >= 9) {
-    return `Conditions look very comfortable for a boat around ${boatLengthFt} ft. Most boaters in this size range should find this a very good ride.`;
-  }
-  if (score >= 7) {
-    return `Conditions look generally good for a boat around ${boatLengthFt} ft. Expect a decent ride, with some movement still possible depending on your comfort level.`;
-  }
-  if (score >= 5) {
-    return `Conditions look mixed for a boat around ${boatLengthFt} ft. Some boaters may still go, but comfort will depend on how much chop you are willing to tolerate.`;
-  }
-  if (score >= 3) {
-    return `Use caution with a boat around ${boatLengthFt} ft. Many boaters would consider this an uncomfortable ride.`;
-  }
+  if (score >= 9) return `Conditions look very comfortable for a boat around ${boatLengthFt} ft. Most boaters in this size range should find this a very good ride.`;
+  if (score >= 7) return `Conditions look generally good for a boat around ${boatLengthFt} ft. Expect a decent ride, with some movement still possible depending on your comfort level.`;
+  if (score >= 5) return `Conditions look mixed for a boat around ${boatLengthFt} ft. Some boaters may still go, but comfort will depend on how much chop you are willing to tolerate.`;
+  if (score >= 3) return `Use caution with a boat around ${boatLengthFt} ft. Many boaters would consider this an uncomfortable ride.`;
   return `Conditions look poor for a boat around ${boatLengthFt} ft. For many boaters this would likely be an uncomfortable or not worthwhile outing.`;
 }
 
@@ -135,7 +120,7 @@ function pickSeries(obj, exactKeys = [], containsTerms = []) {
 }
 
 async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
-  const [startHour, endHour] = windowHours(timeBlock);
+  const targetMs = targetDate(tripDate, timeBlock).getTime();
 
   const makeReq = (model, parameters) =>
     fetch("https://api.windy.com/api/point-forecast/v2", {
@@ -161,19 +146,11 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
 
   const windTs = windJson.ts || [];
   const waveTs = waveJson.ts || [];
+  const windIdx = nearestIndex(windTs, targetMs);
+  const waveIdx = nearestIndex(waveTs, targetMs);
 
-  const windIndexes = windTs
-    .map((stamp, idx) => ({ idx, date: new Date(stamp) }))
-    .filter(({ date }) => toYmd(date) === tripDate && date.getHours() >= startHour && date.getHours() <= endHour)
-    .map(({ idx }) => idx);
-
-  const waveIndexes = waveTs
-    .map((stamp, idx) => ({ idx, date: new Date(stamp) }))
-    .filter(({ date }) => toYmd(date) === tripDate && date.getHours() >= startHour && date.getHours() <= endHour)
-    .map(({ idx }) => idx);
-
-  if (!windIndexes.length) throw new Error("No Windy wind forecast points returned for that date and time window.");
-  if (!waveIndexes.length) throw new Error("No Windy wave forecast points returned for that date and time window.");
+  if (windIdx < 0) throw new Error("No Windy wind data returned.");
+  if (waveIdx < 0) throw new Error("No Windy wave data returned.");
 
   const u = pickSeries(windJson, ["wind_u-surface", "wind_u"], ["wind_u"]);
   const v = pickSeries(windJson, ["wind_v-surface", "wind_v"], ["wind_v"]);
@@ -184,23 +161,15 @@ async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
     ["wave", "height"]
   );
 
-  const windVectors = windIndexes.map((idx) => windFromUv(u[idx], v[idx]));
-  const windSpeedRange = minMax(windVectors.map((item) => item.speed));
-  const avgWindVector = windFromUv(avg(windIndexes.map((idx) => u[idx])) || 0, avg(windIndexes.map((idx) => v[idx])) || 0);
-  const gustRange = minMax(windIndexes.map((idx) => gust[idx]));
-  const waveRange = minMax(waveIndexes.map((idx) => waveHeight[idx]));
-  const waveAvg = avg(waveIndexes.map((idx) => waveHeight[idx])) || 0;
-  const gustAvg = avg(windIndexes.map((idx) => gust[idx])) || 0;
-  const windAvg = avg(windVectors.map((item) => item.speed)) || 0;
+  const windObj = windFromUv(u[windIdx], v[windIdx]);
 
   return {
-    windAvg,
-    gustAvg,
-    waveAvg,
-    windDir: avgWindVector.direction,
-    windRange: windSpeedRange,
-    gustRange,
-    waveRange,
+    sourceTimeWind: windTs[windIdx] || null,
+    sourceTimeWave: waveTs[waveIdx] || null,
+    windAvg: Number.isFinite(windObj.speed) ? windObj.speed : null,
+    windDir: windObj.direction || "—",
+    gustAvg: Number.isFinite(gust[windIdx]) ? gust[windIdx] : null,
+    waveAvg: Number.isFinite(waveHeight[waveIdx]) ? waveHeight[waveIdx] : null,
   };
 }
 
@@ -310,7 +279,9 @@ export default function App() {
     }
 
     run();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [selectedPoint, tripDate, timeBlock]);
 
   const interpreted = useMemo(() => {
@@ -321,7 +292,6 @@ export default function App() {
       waveAvg: pointData.forecast.waveAvg,
       boatLengthFt,
     });
-
     return {
       score,
       label: labelFromScore(score),
@@ -336,7 +306,7 @@ export default function App() {
           <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#cbd5e1" }}>Boater's App</div>
           <h1 style={{ margin: "8px 0 0 0" }}>Boating Meaning</h1>
           <p style={{ margin: "10px 0 0 0", color: "#cbd5e1" }}>
-            Click any spot on the map. The app reads forecast data for that exact point and translates it into simple boating meaning for your boat size.
+            Click any spot on the map. The app uses one exact forecast point and one exact target hour for wind, gusts, and waves.
           </p>
         </div>
 
@@ -419,19 +389,19 @@ export default function App() {
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Wind</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? `${formatSpeedRange(pointData.forecast.windRange, units)} ${pointData.forecast.windDir}` : "—"}
+                    {pointData.forecast ? `${formatSpeed(pointData.forecast.windAvg, units)} ${pointData.forecast.windDir}` : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Gusts</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? formatSpeedRange(pointData.forecast.gustRange, units) : "—"}
+                    {pointData.forecast ? formatSpeed(pointData.forecast.gustAvg, units) : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Waves</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? formatWaveRange(pointData.forecast.waveRange, units) : "—"}
+                    {pointData.forecast ? formatWave(pointData.forecast.waveAvg, units) : "—"}
                   </div>
                 </div>
               </div>
@@ -442,6 +412,14 @@ export default function App() {
               <p style={{ marginTop: 10, lineHeight: 1.6, color: "#334155" }}>
                 {interpreted.reason}
               </p>
+            </div>
+
+            <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 16, padding: 14 }}>
+              <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>Debug timestamps</div>
+              <div style={{ marginTop: 8, color: "#475569", fontSize: 14 }}>
+                Wind: {pointData.forecast?.sourceTimeWind || "—"}<br />
+                Waves: {pointData.forecast?.sourceTimeWave || "—"}
+              </div>
             </div>
           </div>
         </div>
