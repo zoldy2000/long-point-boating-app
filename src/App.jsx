@@ -26,10 +26,10 @@ function targetDate(dateStr, block) {
   return new Date(`${dateStr}T${String(blockTargetHour(block)).padStart(2, "0")}:00:00`);
 }
 
-function nearestIndex(ts, targetMs) {
+function nearestIndex(times, targetMs) {
   let best = -1;
   let bestDiff = Infinity;
-  ts.forEach((stamp, idx) => {
+  times.forEach((stamp, idx) => {
     const diff = Math.abs(new Date(stamp).getTime() - targetMs);
     if (diff < bestDiff) {
       best = idx;
@@ -43,30 +43,25 @@ function mToFt(m) {
   return m * 3.28084;
 }
 
-function mpsToMph(v) {
-  return v * 2.23694;
+function kmhToMph(v) {
+  return v * 0.621371;
 }
 
 function degToCompass(deg) {
+  if (!Number.isFinite(deg)) return "—";
   const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
   const idx = Math.round((((deg % 360) + 360) % 360) / 45) % 8;
   return dirs[idx];
 }
 
-function windFromUv(u, v) {
-  const speed = Math.sqrt(u * u + v * v);
-  const fromDeg = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
-  return { speed, direction: degToCompass(fromDeg) };
+function formatWind(valueKmh, units) {
+  if (!Number.isFinite(valueKmh)) return "—";
+  return units === "metric" ? `${Math.round(valueKmh)} km/h` : `${Math.round(kmhToMph(valueKmh))} mph`;
 }
 
-function formatSpeed(value, units) {
-  if (!Number.isFinite(value)) return "—";
-  return units === "metric" ? `${value.toFixed(1)} m/s` : `${Math.round(mpsToMph(value))} mph`;
-}
-
-function formatWave(value, units) {
-  if (!Number.isFinite(value)) return "—";
-  return units === "metric" ? `${value.toFixed(1)} m` : `${mToFt(value).toFixed(1)} ft`;
+function formatWave(valueM, units) {
+  if (!Number.isFinite(valueM)) return "—";
+  return units === "metric" ? `${valueM.toFixed(1)} m` : `${mToFt(valueM).toFixed(1)} ft`;
 }
 
 function boatFactor(boatLengthFt) {
@@ -77,11 +72,11 @@ function boatFactor(boatLengthFt) {
   return 2;
 }
 
-function scoreFromForecast({ windAvg, gustAvg, waveAvg, boatLengthFt }) {
+function scoreFromForecast({ windAvgKmh, gustAvgKmh, waveAvgM, boatLengthFt }) {
   let score = 10;
-  const windMph = mpsToMph(windAvg || 0);
-  const gustMph = mpsToMph(gustAvg || 0);
-  const waveFt = mToFt(waveAvg || 0);
+  const windMph = kmhToMph(windAvgKmh || 0);
+  const gustMph = kmhToMph(gustAvgKmh || 0);
+  const waveFt = mToFt(waveAvgM || 0);
 
   score -= Math.max(0, (windMph - 10) / 4);
   score -= Math.max(0, (gustMph - 16) / 5);
@@ -107,69 +102,41 @@ function genericInterpretation({ score, boatLengthFt }) {
   return `Conditions look poor for a boat around ${boatLengthFt} ft. For many boaters this would likely be an uncomfortable or not worthwhile outing.`;
 }
 
-function pickSeries(obj, exactKeys = [], containsTerms = []) {
-  for (const key of exactKeys) {
-    if (Array.isArray(obj[key])) return obj[key];
-  }
-  for (const [key, value] of Object.entries(obj)) {
-    if (!Array.isArray(value)) continue;
-    const lower = key.toLowerCase();
-    if (containsTerms.every((term) => lower.includes(term))) return value;
-  }
-  return [];
-}
-
-async function fetchWindyPoint({ lat, lon, tripDate, timeBlock, key }) {
+async function fetchOpenMeteoPoint({ lat, lon, tripDate, timeBlock }) {
   const targetMs = targetDate(tripDate, timeBlock).getTime();
 
-  const makeReq = (model, parameters) =>
-    fetch("https://api.windy.com/api/point-forecast/v2", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-windy-api-key": key },
-      body: JSON.stringify({
-        lat,
-        lon,
-        model,
-        parameters,
-        levels: ["surface"],
-        key,
-      }),
-    }).then(async (res) => {
-      if (!res.ok) throw new Error(`Windy request failed: ${res.status}`);
-      return res.json();
-    });
+  const weatherUrl =
+    `https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}` +
+    `&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m&wind_speed_unit=kmh&timezone=auto&forecast_days=16`;
 
-  const [windJson, waveJson] = await Promise.all([
-    makeReq("gfs", ["wind", "windGust"]),
-    makeReq("gfsWave", ["waves"]),
-  ]);
+  const marineUrl =
+    `https://marine-api.open-meteo.com/v1/marine?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}` +
+    `&hourly=wave_height&timezone=auto&forecast_days=16`;
 
-  const windTs = windJson.ts || [];
-  const waveTs = waveJson.ts || [];
-  const windIdx = nearestIndex(windTs, targetMs);
-  const waveIdx = nearestIndex(waveTs, targetMs);
+  const [weatherResp, marineResp] = await Promise.all([fetch(weatherUrl), fetch(marineUrl)]);
+  if (!weatherResp.ok) throw new Error(`Open-Meteo weather failed: ${weatherResp.status}`);
+  if (!marineResp.ok) throw new Error(`Open-Meteo marine failed: ${marineResp.status}`);
 
-  if (windIdx < 0) throw new Error("No Windy wind data returned.");
-  if (waveIdx < 0) throw new Error("No Windy wave data returned.");
+  const weatherJson = await weatherResp.json();
+  const marineJson = await marineResp.json();
 
-  const u = pickSeries(windJson, ["wind_u-surface", "wind_u"], ["wind_u"]);
-  const v = pickSeries(windJson, ["wind_v-surface", "wind_v"], ["wind_v"]);
-  const gust = pickSeries(windJson, ["gust-surface", "windGust-surface", "gust"], ["gust"]);
-  const waveHeight = pickSeries(
-    waveJson,
-    ["waves_height-surface", "wavesHeight-surface", "waves", "waves_height"],
-    ["wave", "height"]
-  );
+  const weatherTimes = weatherJson.hourly?.time || [];
+  const marineTimes = marineJson.hourly?.time || [];
 
-  const windObj = windFromUv(u[windIdx], v[windIdx]);
+  const weatherIdx = nearestIndex(weatherTimes, targetMs);
+  const marineIdx = nearestIndex(marineTimes, targetMs);
+
+  if (weatherIdx < 0) throw new Error("No weather data returned.");
+  if (marineIdx < 0) throw new Error("No marine data returned.");
 
   return {
-    sourceTimeWind: windTs[windIdx] || null,
-    sourceTimeWave: waveTs[waveIdx] || null,
-    windAvg: Number.isFinite(windObj.speed) ? windObj.speed : null,
-    windDir: windObj.direction || "—",
-    gustAvg: Number.isFinite(gust[windIdx]) ? gust[windIdx] : null,
-    waveAvg: Number.isFinite(waveHeight[waveIdx]) ? waveHeight[waveIdx] : null,
+    sourceTimeWeather: weatherTimes[weatherIdx] || null,
+    sourceTimeMarine: marineTimes[marineIdx] || null,
+    windAvgKmh: weatherJson.hourly?.wind_speed_10m?.[weatherIdx] ?? null,
+    windDirDeg: weatherJson.hourly?.wind_direction_10m?.[weatherIdx] ?? null,
+    windDir: degToCompass(weatherJson.hourly?.wind_direction_10m?.[weatherIdx]),
+    gustAvgKmh: weatherJson.hourly?.wind_gusts_10m?.[weatherIdx] ?? null,
+    waveAvgM: marineJson.hourly?.wave_height?.[marineIdx] ?? null,
   };
 }
 
@@ -256,25 +223,19 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const key = import.meta.env.VITE_WINDY_API_KEY;
-    if (!key) {
-      setPointData({ status: "missing-key", message: "Windy key not found in app environment.", forecast: null });
-      return;
-    }
 
     async function run() {
       setPointData((prev) => ({ ...prev, status: "loading", message: "" }));
       try {
-        const forecast = await fetchWindyPoint({
+        const forecast = await fetchOpenMeteoPoint({
           lat: selectedPoint.lat,
           lon: selectedPoint.lon,
           tripDate,
           timeBlock,
-          key,
         });
         if (!cancelled) setPointData({ status: "ready", message: "", forecast });
       } catch (error) {
-        if (!cancelled) setPointData({ status: "error", message: error.message || "Windy request failed.", forecast: null });
+        if (!cancelled) setPointData({ status: "error", message: error.message || "Open-Meteo request failed.", forecast: null });
       }
     }
 
@@ -287,9 +248,9 @@ export default function App() {
   const interpreted = useMemo(() => {
     if (!pointData.forecast) return { score: "—", label: "—", reason: "Click a spot and wait for the forecast." };
     const score = scoreFromForecast({
-      windAvg: pointData.forecast.windAvg,
-      gustAvg: pointData.forecast.gustAvg,
-      waveAvg: pointData.forecast.waveAvg,
+      windAvgKmh: pointData.forecast.windAvgKmh,
+      gustAvgKmh: pointData.forecast.gustAvgKmh,
+      waveAvgM: pointData.forecast.waveAvgM,
       boatLengthFt,
     });
     return {
@@ -306,7 +267,7 @@ export default function App() {
           <div style={{ fontSize: 12, letterSpacing: 2, textTransform: "uppercase", color: "#cbd5e1" }}>Boater's App</div>
           <h1 style={{ margin: "8px 0 0 0" }}>Boating Meaning</h1>
           <p style={{ margin: "10px 0 0 0", color: "#cbd5e1" }}>
-            Click any spot on the map. The app uses one exact forecast point and one exact target hour for wind, gusts, and waves.
+            Click any spot on the map. This version uses Open-Meteo weather plus Open-Meteo marine data for one exact forecast hour.
           </p>
         </div>
 
@@ -368,7 +329,7 @@ export default function App() {
             </div>
 
             {pointData.status === "loading" && <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 16, padding: 14 }}>Loading forecast...</div>}
-            {(pointData.status === "error" || pointData.status === "missing-key") && (
+            {pointData.status === "error" && (
               <div style={{ marginTop: 14, background: "#fee2e2", color: "#991b1b", borderRadius: 16, padding: 14 }}>{pointData.message}</div>
             )}
 
@@ -384,24 +345,24 @@ export default function App() {
             </div>
 
             <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 16, padding: 14 }}>
-              <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>Forecast at this exact spot</div>
+              <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>Open-Meteo data at this exact spot</div>
               <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr 1fr", marginTop: 10 }}>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Wind</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? `${formatSpeed(pointData.forecast.windAvg, units)} ${pointData.forecast.windDir}` : "—"}
+                    {pointData.forecast ? `${formatWind(pointData.forecast.windAvgKmh, units)} ${pointData.forecast.windDir}` : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Gusts</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? formatSpeed(pointData.forecast.gustAvg, units) : "—"}
+                    {pointData.forecast ? formatWind(pointData.forecast.gustAvgKmh, units) : "—"}
                   </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 12, textTransform: "uppercase", color: "#64748b" }}>Waves</div>
                   <div style={{ marginTop: 4, fontWeight: 700 }}>
-                    {pointData.forecast ? formatWave(pointData.forecast.waveAvg, units) : "—"}
+                    {pointData.forecast ? formatWave(pointData.forecast.waveAvgM, units) : "—"}
                   </div>
                 </div>
               </div>
@@ -417,8 +378,8 @@ export default function App() {
             <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 16, padding: 14 }}>
               <div style={{ fontSize: 13, color: "#64748b", fontWeight: 700 }}>Debug timestamps</div>
               <div style={{ marginTop: 8, color: "#475569", fontSize: 14 }}>
-                Wind: {pointData.forecast?.sourceTimeWind || "—"}<br />
-                Waves: {pointData.forecast?.sourceTimeWave || "—"}
+                Weather: {pointData.forecast?.sourceTimeWeather || "—"}<br />
+                Marine: {pointData.forecast?.sourceTimeMarine || "—"}
               </div>
             </div>
           </div>
